@@ -54,7 +54,11 @@ was verified against a real OpenCode server.
 6. **A run is over when the script says so.** On timeout or exit, abort every busy session in the
    task's worktree. A session still queued when its client dies otherwise keeps running and edits
    the worktree after the run was reported.
-7. **Evidence, not claims.** Changed files come from `git status` before and after the run. Run-log
+7. **Minimal server environment.** `opencode serve` starts with `server_env()`'s allowlist, never a
+   copy of the caller's environment, and with the bundled `opencode-plugin/scrub-env.js` loaded via
+   `OPENCODE_CONFIG_CONTENT`; a run requires that plugin's fresh heartbeat. Every command OpenCode
+   runs inherits the server's environment.
+8. **Evidence, not claims.** Changed files come from `git status` before and after the run. Run-log
    entries are measured values only; never write estimated or invented numbers into
    `runs.jsonl`.
 

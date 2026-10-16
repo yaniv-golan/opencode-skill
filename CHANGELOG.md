@@ -3,6 +3,23 @@
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.0.1] - 2026-10-17
+
+### Security
+- The shared server now starts with a minimal environment instead of a copy of the caller's, so
+  secrets in the shell Claude runs in (API keys, tokens) no longer reach OpenCode's shells. Extra
+  variables are passed only when named in `OPENCODE_DELEGATE_PASS_ENV`.
+- A bundled server-level OpenCode plugin blanks `OPENCODE_SERVER_PASSWORD` in every command
+  OpenCode runs. A run is refused unless the plugin wrote a fresh load heartbeat for its worktree,
+  and an idle server started without the current plugin is restarted automatically.
+
+### Fixed
+- A failed or slow server start no longer overwrites the record of a running server, which left an
+  unreachable server holding the port. The server is recorded only once healthy, a busy port is
+  detected by TCP connect instead of an HTTP timeout, and a live-but-unresponsive server is reported
+  instead of being started twice.
+- A run refused after its worktree was created now removes that worktree and branch.
+
 ## [2.0.0] - 2026-10-16
 
 Fork of [pcx-wave/opencode-skill](https://github.com/pcx-wave/opencode-skill) at `7b06df5`, rewritten

@@ -26,11 +26,14 @@ Environment:
   OPENCODE_DELEGATE_MODEL   default model (else opencode/deepseek-v4.1-flash-free)
   OPENCODE_DELEGATE_PORT    server port (default 4096)
   OPENCODE_DELEGATE_HOME    state dir (default ~/.local/state/opencode-delegate)
+  OPENCODE_DELEGATE_PASS_ENV  comma-separated extra variables to pass to the server. By default
+                            it gets only PATH/HOME/locale/proxy/toolchain basics, because every
+                            command OpenCode runs inherits the server's environment.
   OPENCODE_DELEGATE_PATH_PREPEND  dir(s) put first on PATH for the server (so for every
                             shell command OpenCode runs) and for --setup, e.g. a pinned
                             Node: ~/.nvm/versions/node/v24.18.0/bin. Read at server start.
 """
-import argparse, base64, json, os, re, secrets, shutil, signal, subprocess, sys, threading, time, queue
+import argparse, base64, hashlib, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
 import urllib.request, urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -43,6 +46,8 @@ SERVER_FILE = HOME / "server.json"
 RUN_LOG = HOME / "runs.jsonl"
 WORKTREES = HOME / "worktrees"
 POLICY_FILE = "opencode.json"
+SCRUB_PLUGIN = Path(__file__).resolve().parent / "opencode-plugin" / "scrub-env.js"
+HEARTBEATS = HOME / "alive"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
 DENIED_MARK = "prevents you from using this specific tool call"
 
@@ -55,6 +60,41 @@ def toolchain_env(base=None):
     if pre:
         env["PATH"] = os.path.expanduser(pre) + os.pathsep + env.get("PATH", "")
     return env
+
+
+# The server's environment is inherited by every command OpenCode runs, so it
+# gets only what it needs. Anything else (e.g. a paid provider's API key) must
+# be named in OPENCODE_DELEGATE_PASS_ENV (comma-separated).
+SERVER_ENV_KEEP = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "LANG",
+                   "TZ", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+                   "NVM_DIR", "PNPM_HOME", "COREPACK_HOME", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+                   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"}
+
+
+def server_env():
+    """Minimal environment for `opencode serve` (and so for OpenCode's shells)."""
+    passthrough = {v.strip() for v in os.environ.get("OPENCODE_DELEGATE_PASS_ENV", "").split(",") if v.strip()}
+    env = {k: v for k, v in os.environ.items()
+           if k in SERVER_ENV_KEEP or k in passthrough or k.startswith("LC_")
+           or (k.startswith("OPENCODE_") and not k.startswith("OPENCODE_DELEGATE_")
+               and k != "OPENCODE_SERVER_PASSWORD")}
+    return toolchain_env(env)
+
+
+def server_plugin_config(env):
+    """OPENCODE_CONFIG_CONTENT that adds our scrub plugin, merged with any the user set."""
+    try:
+        cfg = json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}")
+    except ValueError:
+        die("OPENCODE_CONFIG_CONTENT is set but is not JSON; can't add the safety plugin to it")
+    plugins = [p for p in cfg.get("plugin", []) if "opencode-delegate" not in json.dumps(p)]
+    plugins.append([SCRUB_PLUGIN.as_uri(), {"heartbeat_dir": str(HEARTBEATS)}])
+    cfg["plugin"] = plugins
+    return json.dumps(cfg)
+
+
+def heartbeat_file(directory):
+    return HEARTBEATS / hashlib.sha256(str(directory).encode()).hexdigest()[:32]
 
 
 def node_version(env):
@@ -129,38 +169,64 @@ def server_start(quiet=False):
         if not quiet:
             print(f"server already running at {URL} (pid {state.get('pid', '?')})")
         return state
-    # Something answering on the port that rejects our credentials is not ours.
+    if _pid_alive(state.get("pid")):
+        # Ours, alive, but not answering: never start a second one beside it.
+        die(f"the server this script started (pid {state['pid']}) is running but not answering "
+            f"health checks; retry shortly, or `server stop` to restart it")
+    # Anything else listening on the port is not ours. A plain TCP connect, so a
+    # slow or busy foreign server is not mistaken for a free port.
     try:
-        urllib.request.urlopen(URL + "/global/health", timeout=2)
-        die(f"port {PORT} is held by a server this script did not start; "
-            f"set OPENCODE_DELEGATE_PORT to a free port")
-    except urllib.error.HTTPError:
-        die(f"port {PORT} is held by a password-protected server this script did not start; "
-            f"set OPENCODE_DELEGATE_PORT to a free port")
-    except (urllib.error.URLError, OSError):
+        socket.create_connection(("127.0.0.1", PORT), timeout=2).close()
+        die(f"port {PORT} is held by a process this script did not start "
+            f"(see `lsof -nP -iTCP:{PORT} -sTCP:LISTEN`); stop it or set OPENCODE_DELEGATE_PORT")
+    except OSError:
         pass
     HOME.mkdir(parents=True, exist_ok=True)
     password = secrets.token_urlsafe(24)
     log = open(HOME / "server.log", "ab")
-    env = toolchain_env()
+    if not SCRUB_PLUGIN.is_file():
+        die(f"safety plugin missing: {SCRUB_PLUGIN}")
+    env = server_env()
+    env["OPENCODE_CONFIG_CONTENT"] = server_plugin_config(env)
     env["OPENCODE_SERVER_PASSWORD"] = password
     proc = subprocess.Popen(["opencode", "serve", "--hostname", "127.0.0.1", "--port", str(PORT)],
                             stdout=log, stderr=log, stdin=subprocess.DEVNULL, env=env,
                             start_new_session=True)
     state = {"pid": proc.pid, "port": PORT, "password": password, "node": node_version(env),
+             "scrub_plugin": hashlib.sha256(SCRUB_PLUGIN.read_bytes()).hexdigest(),
              "path_prepend": os.environ.get("OPENCODE_DELEGATE_PATH_PREPEND", ""),
              "started": datetime.now(timezone.utc).isoformat()}
-    SERVER_FILE.write_text(json.dumps(state))
-    os.chmod(SERVER_FILE, 0o600)
     for _ in range(60):
         if proc.poll() is not None:
             die(f"opencode serve exited with {proc.returncode}; see {HOME / 'server.log'}")
         if server_healthy(state):
+            # Record only a server that is up, so a failed start never orphans a live one.
+            tmp = SERVER_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, SERVER_FILE)
             if not quiet:
                 print(f"server started at {URL} (pid {proc.pid}); log: {HOME / 'server.log'}")
             return state
         time.sleep(0.5)
-    die(f"opencode serve did not become healthy in 30s; see {HOME / 'server.log'}")
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    die(f"opencode serve did not become healthy in 30s (stopped it); see {HOME / 'server.log'}")
+
+
+def _pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    r = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
+    return "opencode" in r.stdout and "serve" in r.stdout
 
 
 def server_stop():
@@ -414,16 +480,33 @@ def cmd_run(args):
     repo = repo_root(Path(args.repo).resolve())
 
     state = server_start(quiet=True)
+    want = hashlib.sha256(SCRUB_PLUGIN.read_bytes()).hexdigest()
+    if state.get("scrub_plugin") != want:
+        busy = [k for k, v in (api("GET", "/session/status", state) or {}).items()
+                if (v or {}).get("type") != "idle"]
+        if busy:
+            die("the running server was started without the current safety plugin and has "
+                f"{len(busy)} active session(s); wait for them, then `server stop` and retry")
+        print("[setup] restarting the server to load the current safety plugin")
+        server_stop()
+        state = server_start(quiet=True)
     models = {m[0]: m for m in list_models(state)}
     if model not in models:
         free = sorted(k for k, v in models.items() if v[1])
         die(f"model {model} not offered by the server. Free now: {', '.join(free) or 'none'}")
 
+    def discard_if_new():
+        if created:
+            git(repo, "worktree", "remove", "--force", str(wt), check=False)
+            git(repo, "branch", "-D", f"opencode/{args.task}", check=False)
+
     def refuse(problems, where):
+        discard_if_new()
         die(f"refusing to delegate: unsafe or missing OpenCode policy in {where}:\n  - "
             + "\n  - ".join(problems)
             + f"\nFix: python3 {Path(__file__).resolve()} init {repo}  (then commit opencode.json)")
 
+    created, wt = False, None
     # Check before creating anything, so a refusal leaves no worktree behind.
     if not worktree_path(repo, args.task).exists():
         problems = check_policy(repo / POLICY_FILE)
@@ -469,6 +552,7 @@ def cmd_run(args):
 
     # The server caches each directory's config on first use; without this a
     # tightened allowlist is silently ignored (verified on 1.19.3).
+    disposed_at = time.time()
     try:
         api("POST", f"/instance/dispose?directory={urllib.request.quote(str(wt))}", state)
     except Exception as e:
@@ -483,6 +567,16 @@ def cmd_run(args):
         problems = [f"could not read the effective config from the server: {e}"]
     if problems and not args.unsafe_policy:
         refuse(problems, f"the server's effective config for {wt}")
+    # The config request above re-created the instance, which loads plugins.
+    hb = heartbeat_file(wt)
+    try:
+        fresh = json.loads(hb.read_text()).get("loaded", 0) / 1000 >= disposed_at - 1
+    except (OSError, ValueError):
+        fresh = False
+    if not fresh:
+        discard_if_new()
+        die(f"refusing to delegate: the safety plugin did not load for {wt} "
+            f"(no fresh heartbeat at {hb}); see {HOME / 'server.log'}")
 
     before = porcelain(wt)
     head = git(wt, "rev-parse", "HEAD").strip()

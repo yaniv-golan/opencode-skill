@@ -10,7 +10,7 @@ description: >
   for delegation (opencode.json policy), choosing the OpenCode model, and reporting past runs.
 argument-hint: "<task description>"
 metadata:
-  version: 2.0.0
+  version: 2.0.1
 ---
 
 # OpenCode delegation
@@ -186,6 +186,12 @@ models are "limited time" and the list changes, so check it rather than trusting
   script it is then allowed to run. Isolation (worktree) and your review are the real safety net.
 - **Worktrees start from committed `HEAD`.** The user's uncommitted work is invisible to OpenCode.
   If the task depends on it, ask the user to commit first, or pass `--base`.
+- **What OpenCode's shells can see.** The server starts with a minimal environment (PATH, HOME,
+  locale, proxy and toolchain basics, plus `OPENCODE_*` settings), because every command OpenCode
+  runs inherits it. Pass anything else explicitly with `OPENCODE_DELEGATE_PASS_ENV=NAME,…`. A
+  bundled server plugin also blanks the server password inside every OpenCode shell; the run is
+  refused if that plugin did not load. This is risk reduction, not isolation: the same user can still
+  read the password from the state dir, and any credential files.
 - **Pinned toolchains.** OpenCode's shell commands run with the *server's* PATH, shared by every
   repo. If a repo pins Node (`.nvmrc`) the script warns on mismatch; fix it with
   `server stop`, then start again with `OPENCODE_DELEGATE_PATH_PREPEND=<pinned node bin dir>` set
