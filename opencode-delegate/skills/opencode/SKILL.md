@@ -10,7 +10,7 @@ description: >
   for delegation (opencode.json policy), choosing the OpenCode model, and reporting past runs.
 argument-hint: "<task description>"
 metadata:
-  version: 2.0.1
+  version: 2.0.2
 ---
 
 # OpenCode delegation
@@ -50,6 +50,11 @@ and pass it along verbatim, including to any sub-agent. `delegate.py --help` lis
 
 Find the repo root (`git rev-parse --show-toplevel`). Read its agent rules (`AGENTS.md`,
 `CLAUDE.md`, `CONTRIBUTING.md`) — they bind you, and OpenCode reads `AGENTS.md` itself.
+
+**If the repo, or any folder above it, contains a `.opencode/` directory, stop and ask the user
+before delegating.** OpenCode loads plugins, tools, skills, agents and commands from it into the
+shared server, where they run outside the `opencode.json` policy. Nothing in the script checks for
+this yet.
 
 If there is no `opencode.json` at the root, delegation will be refused. Create one:
 

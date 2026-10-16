@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Delegate coding work to the OpenCode CLI (free models such as DeepSeek V4.1 Flash via OpenCode Zen) while Claude plans, writes the brief, supervises and reviews.",
-    "version": "2.0.1"
+    "version": "2.0.2"
   },
   "plugins": [
     {

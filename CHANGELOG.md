@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.0.2] - 2026-10-17
+
+### Security
+- The skill now tells Claude to stop and ask before delegating in a repo that has a `.opencode/`
+  directory in it or above it. OpenCode loads plugins, tools, skills, agents and commands from there
+  into the shared server, outside the `opencode.json` policy. Interim guidance; an enforced fix is
+  being designed together with sandboxing.
+
 ## [2.0.1] - 2026-10-17
 
 ### Security
