@@ -3,3 +3,7 @@
 *~
 /tmp/
 .context-oracle/
+
+# Local-only notes and Claude instructions, never committed to the public repo
+/docs/internal/
+/CLAUDE.local.md

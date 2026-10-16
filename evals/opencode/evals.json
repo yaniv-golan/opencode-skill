@@ -1,0 +1,23 @@
+{
+  "skill_name": "opencode",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "/opencode add a sub(a, b) function next to add() in math.js and make sure it's exported",
+      "expected_output": "Claude checks for opencode.json (runs init if missing and asks before committing it), writes a self-contained brief with Files/TASK/CONSTRAINTS/VERIFY, runs delegate.py run with a kebab-case --task, reviews the diff from the worktree, runs a check itself, and reports with the fixed template without committing or merging unasked.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "have opencode do these two in parallel: (1) add input validation to parseDate in src/date.js so invalid strings throw a RangeError, (2) add a README section documenting the CLI flags in src/cli.js",
+      "expected_output": "Two independent --task slugs launched together in the background, each with its own brief; both diffs reviewed separately; no bare `opencode run` and no second server.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "delegate the refactor of the export pipeline to opencode — the last attempt timed out and I don't know what state it's in",
+      "expected_output": "Claude inspects the existing task worktree with `list`/`diff` before relaunching, reuses the same --task so work carries forward, splits the refactor into smaller tasks or raises --timeout, and does not run `remove --force` or discard work without asking.",
+      "files": []
+    }
+  ]
+}

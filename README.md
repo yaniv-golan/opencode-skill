@@ -1,212 +1,102 @@
-# opencode-skill
+# opencode-delegate
 
-![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
+[![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-plugin-F97316)](https://docs.anthropic.com/en/docs/claude-code/plugins)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Packaged with Skill Packager](https://img.shields.io/badge/Packaged_with-Skill_Packager-8B5CF6?style=flat-square)](https://github.com/yaniv-golan/skill-packager-skill)
 
-**Claude orchestrates. OpenCode codes. You review the diff.**
+**Claude orchestrates. OpenCode codes. Claude reviews. You decide what lands.**
 
-A Claude Code skill that delegates coding tasks to **OpenCode CLI** and supervises the result — the same pattern as [vibe-skill](https://github.com/pcx-wave/vibe-skill) and [gemini-skill](https://github.com/pcx-wave/gemini-skill).
+A Claude Code skill that hands coding tasks to the [OpenCode](https://opencode.ai) CLI, typically
+on a free model from OpenCode Zen. Claude splits the work, writes a self-contained brief for each
+task, supervises the run, reviews the diff, and runs your project's real checks. OpenCode does the
+editing.
 
----
+Forked from [pcx-wave/opencode-skill](https://github.com/pcx-wave/opencode-skill) (MIT) and
+rewritten. The changes from upstream:
 
-## What it does
+| Upstream | This fork |
+|---|---|
+| Runs in your working tree; `git checkout .` to undo | One git worktree + branch (`opencode/<task>`) per task; your checkout is never touched |
+| `--dangerously-skip-permissions` (approve everything) | `--auto` gated by a required default-deny `opencode.json` policy |
+| One `opencode run` process per task; concurrent runs fail with `database is locked` | All runs attach to one shared, password-protected `opencode serve`; parallel tasks work |
+| Bash + GNU `timeout` (missing on macOS) | Single stdlib Python script; works on macOS and Linux |
+| Kills only the client on timeout | Aborts the server-side session |
+| Changed files by mtime over the whole tree | `git status` before/after, OpenCode's changes only |
+| Auto-mode via a rule appended to global `~/.claude/CLAUDE.md` | Opt-in per project, in that project's `CLAUDE.md` |
+| Hard-coded, now-retired default model | `opencode/deepseek-v4.1-flash-free`, validated against the live model list |
 
-When you type `/opencode <instruction>` in Claude Code, this skill:
+## Requirements
 
-1. Decomposes the task into atomic sub-tasks (if needed)
-2. Writes a self-contained prompt for OpenCode
-3. Runs `opencode-delegate` — a script that launches OpenCode CLI in non-interactive mode
-4. Streams structured output: `[read]`, `[edit]`, `[write]`, `[search]`, `[shell]`, `[opencode]`
-5. Runs post-run syntax checks on modified `.py`, `.js`, `.json`, `.sh` files automatically
-6. Reports the git diff and any issues to you
-7. Appends a structured JSON entry to `~/.local/share/delegate-runs.jsonl` (tokens, cost, duration, exit code)
+- OpenCode CLI ≥ 1.19 (`brew install opencode`); tested on 1.19.3
+- Python 3.9+, git ≥ 2.25
+- Claude Code
 
----
+## Install
 
-## Prerequisites
-
-- [OpenCode CLI](https://opencode.ai) installed (`opencode --version`)
-- [Claude Code](https://claude.ai/code) with skills enabled
-- `python3` available (for the streaming parser and syntax checks)
-- A git repository to work in
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/pcx-wave/opencode-skill.git && cd opencode-skill && mkdir -p ~/tools ~/.claude/skills/opencode ~/.claude/skills/opencodeon ~/.claude/skills/opencodeoff ~/.claude/skills/opencodestatus ~/.claude/skills/opencode-model-pick ~/.claude/skills/opencode-model-clear && ln -sf "$(pwd)/tools/opencode-delegate" ~/tools/opencode-delegate && ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report && chmod +x ~/tools/opencode-delegate ~/tools/delegate-report && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/opencode/SKILL.md && ln -sf "$(pwd)/OPENCODEON.md" ~/.claude/skills/opencodeon/SKILL.md && ln -sf "$(pwd)/OPENCODEOFF.md" ~/.claude/skills/opencodeoff/SKILL.md && ln -sf "$(pwd)/OPENCODESTATUS.md" ~/.claude/skills/opencodestatus/SKILL.md && ln -sf "$(pwd)/OPENCODEMODELPICK.md" ~/.claude/skills/opencode-model-pick/SKILL.md && ln -sf "$(pwd)/OPENCODEMODELCLEAR.md" ~/.claude/skills/opencode-model-clear/SKILL.md
-```
-
-### Step-by-step
+From your terminal:
 
 ```bash
-# 1. Clone this repo
-git clone https://github.com/pcx-wave/opencode-skill.git
-cd opencode-skill
-
-# 2. Install the scripts (symlinks — stay in sync with git pull)
-mkdir -p ~/tools
-ln -sf "$(pwd)/tools/opencode-delegate" ~/tools/opencode-delegate
-ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report
-chmod +x ~/tools/opencode-delegate ~/tools/delegate-report
-
-# 3. Install the skills for Claude Code
-mkdir -p ~/.claude/skills/opencode ~/.claude/skills/opencodeon ~/.claude/skills/opencodeoff \
-         ~/.claude/skills/opencodestatus ~/.claude/skills/opencode-model-pick ~/.claude/skills/opencode-model-clear
-ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/opencode/SKILL.md
-ln -sf "$(pwd)/OPENCODEON.md" ~/.claude/skills/opencodeon/SKILL.md
-ln -sf "$(pwd)/OPENCODEOFF.md" ~/.claude/skills/opencodeoff/SKILL.md
-ln -sf "$(pwd)/OPENCODESTATUS.md" ~/.claude/skills/opencodestatus/SKILL.md
-ln -sf "$(pwd)/OPENCODEMODELPICK.md" ~/.claude/skills/opencode-model-pick/SKILL.md
-ln -sf "$(pwd)/OPENCODEMODELCLEAR.md" ~/.claude/skills/opencode-model-clear/SKILL.md
-
-# 4. (Optional) Enable auto-mode — Claude delegates all code tasks automatically
-#    without requiring /opencode each time. Toggle with /opencodeon and /opencodeoff.
-grep -q "opencode auto-mode" ~/.claude/CLAUDE.md 2>/dev/null || cat >> ~/.claude/CLAUDE.md << 'EOF'
-
-# opencode auto-mode
-At the start of every user request that involves writing, editing, or fixing code:
-1. Run `test -f ~/.local/share/opencode-auto.flag` (silent, no output to user).
-2. If the flag exists → automatically invoke the `opencode` skill exactly as if the user had typed `/opencode <their full instruction>`. Do NOT ask first, do NOT explain — just delegate.
-3. If the flag is absent → proceed normally.
-
-The flag is toggled by `/opencodeon` and `/opencodeoff`.
-EOF
+claude plugin marketplace add https://github.com/yaniv-golan/opencode-skill
+claude plugin install opencode-delegate@opencode-delegate-marketplace
 ```
 
-### Verify the install
+Or from within a Claude Code session:
+
+```
+/plugin marketplace add yaniv-golan/opencode-skill
+/plugin install opencode-delegate@opencode-delegate-marketplace
+```
+
+To work on the skill itself, add a local clone as the marketplace instead:
+`/plugin marketplace add /path/to/opencode-skill`.
+
+## Set up a repository
+
+`<plugin>` below is the installed plugin directory. Claude resolves it for you; to run the script
+yourself, find it with `find ~/.claude/plugins -path '*opencode-delegate/skills/opencode/scripts/delegate.py'`.
+
+Delegation is refused until the repo has an `opencode.json` that denies unlisted shell commands:
 
 ```bash
-# Check opencode is available
-opencode --version
-
-# Test the delegate script
-~/tools/opencode-delegate /tmp "Say hello in one sentence." 60
-# Should print: [opencode] Hello! ...
+python3 <plugin>/skills/opencode/scripts/delegate.py init /path/to/repo \
+  --allow "pnpm check" --allow "pnpm test:unit"
 ```
 
-### Updating
+Allow only the exact commands OpenCode needs to check its own work. Commit the file.
 
-Because the install uses symlinks, a `git pull` is all you need:
+If the repo pins a toolchain (e.g. `.nvmrc`), start the shared server with that toolchain first on
+PATH, because OpenCode's shell commands inherit the server's environment:
 
 ```bash
-cd ~/opencode-skill && git pull
+OPENCODE_DELEGATE_PATH_PREPEND=~/.nvm/versions/node/v24.18.0/bin \
+  python3 <plugin>/skills/opencode/scripts/delegate.py server start
 ```
 
-`~/tools/opencode-delegate` and all skill files are automatically up to date — no re-copy needed.
+## Use
 
----
-
-## Usage
-
-In a Claude Code session, just describe what you want:
+In Claude Code:
 
 ```
-/opencode add a dark mode toggle to the settings page
+/opencode-delegate:opencode add input validation to the export dialog
 ```
 
-```
-/opencode the login form is not validating the email field — fix it
-```
+Or ask Claude to "have OpenCode do it". To make delegation the default for one project, add a
+line saying so to that project's `CLAUDE.md`.
 
-Claude will decompose the task, write the OpenCode prompt, supervise execution, and report the diff.
+Script commands (`delegate.py --help`): `server start|stop|status`, `models`, `init`, `run`,
+`diff`, `list`, `remove`, `report`.
 
----
+## Safety model
 
-## Auto-delegate mode
-
-For frictionless delegation, enable auto-mode once in your Claude Code session:
-
-```
-/opencodeon      — every code request is automatically delegated to OpenCode
-/opencodeoff     — return to normal Claude behaviour
-/opencodestatus  — check if auto-mode is ON or OFF
-```
-
-With `opencodeon` active, just talk to Claude normally — coding tasks go to OpenCode automatically.
-
----
-
-## How opencode-delegate works
-
-```
-Claude Code
-  └─ /opencode <instruction>
-       └─ SKILL.md logic
-            └─ ~/tools/opencode-delegate <workdir> <prompt> [timeout] [model]
-                 ├─ writes prompt to temp file (avoids shell injection)
-                 ├─ runs: opencode run <prompt> --format json
-                 │   --dangerously-skip-permissions --model <model> --dir <workdir>
-                 │   └─ no pseudo-TTY needed (unlike Vibe)
-                 ├─ pipes JSON events through Python parser
-                 │   └─ handles: step_start / tool_use / text / step_finish / error
-                 │   └─ prints [read] / [edit] / [write] / [search] / [shell] / [opencode]
-                 ├─ aggregates real token counts from step_finish events
-                 ├─ runs syntax checks on modified .py, .js, .json, .sh files
-                 ├─ prints git diff --stat
-                 └─ appends JSON entry to ~/.local/share/delegate-runs.jsonl
-```
-
-### Why no pseudo-TTY?
-
-Unlike Mistral Vibe, OpenCode CLI works fine in a plain pipe — no TTY check on startup.
-
-### Why prompt via temp file?
-
-Inline shell arguments break when the prompt contains Python dict syntax, emojis, accented characters, or multi-line code. Writing to a temp file avoids all shell injection issues.
-
-### Why a timeout instead of `--max-turns`?
-
-OpenCode CLI has no `--max-turns` flag. The timeout is the only runaway-control lever.
-
----
-
-## Token economics
-
-OpenCode's internal tool calls consume **OpenCode tokens**, not Claude tokens.
-Claude only receives the compressed final output (~200-800 tokens/run).
-
-**Pricing depends on the model used:**
-- `opencode/deepseek-v4-flash-free` — **free**, no API key needed (may have queue delays)
-- `google/gemini-2.5-flash` — requires `GOOGLE_GENERATIVE_AI_API_KEY` env var
-
-Real token counts and cost are printed after every run and appended to the run log.
-
----
-
-## Known limitations
-
-| Limitation | Detail |
-|-----------|--------|
-| No `--max-turns` | Timeout is the only runaway control |
-| `--dangerously-skip-permissions` | All tools auto-approved (safe with post-run review) |
-| Free model delays | May have queue during peak usage |
-| No `--workdir` flag | Script `cd`s into workdir instead |
-
----
-
-## Run Log
-
-Every run appends one JSON entry to `~/.local/share/delegate-runs.jsonl`.
-The shared `~/tools/delegate-report` script can query all runs across delegates.
-
-```bash
-~/tools/delegate-report                  # full report
-~/tools/delegate-report --since 7        # last 7 days
-~/tools/delegate-report --fails          # failures only
-```
-
----
-
-## Sister projects
-
-- [vibe-skill](https://github.com/pcx-wave/vibe-skill) — delegate to Mistral Vibe
-- [gemini-skill](https://github.com/pcx-wave/gemini-skill) — delegate to Gemini CLI
-
-All three write to the same `delegate-runs.jsonl` log, making runs comparable across delegates.
-
----
+- `--auto` approves every permission that is not explicitly denied, so the policy must be an
+  allowlist: `"bash": {"*": "deny", ...}` and `"external_directory": "deny"`. The script refuses to
+  run without them.
+- The policy is not a sandbox. OpenCode can edit any file in its worktree, including a test it is
+  allowed to run. The worktree isolation and Claude's review are the real safety net; use a
+  container if you need containment.
+- Free models are offered for a limited time and have different data terms. Some log or train on
+  inputs, so check before using one on private code.
 
 ## License
 
-MIT
+MIT, following upstream.
