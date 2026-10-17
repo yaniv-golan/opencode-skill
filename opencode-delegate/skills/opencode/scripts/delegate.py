@@ -969,6 +969,8 @@ def cmd_run(args):
                                     "created": datetime.now(timezone.utc).isoformat(),
                                     "snapshot_untracked": snap_untracked})
     meta = load_meta(repo, args.task, wt)
+    meta["repo"] = str(repo)
+    save_meta(repo, args.task, meta)
     # --check/--only persist on the task so a later attempt of the same task re-runs/re-applies
     # them even when the flags are omitted.
     if args.check:
@@ -1094,6 +1096,18 @@ def cmd_run(args):
             f"(no fresh heartbeat at {hb}); see {HOME / 'server.log'}")
     if tokfile.exists():
         print("[WARN] the messaging plugin did not pick up its token; task messaging is off for this run")
+
+    # Save the caller's brief so a later session can recover it after a timeout, crash or
+    # compaction: the prompt itself, without the queued-message block or the standing rules.
+    attempt = attempt_count(wt, meta["base"]) + 1
+    brief_dir = TASKS / repo.name
+    brief_dir.mkdir(parents=True, exist_ok=True)
+    for bp in (brief_dir / f"{args.task}.brief-{attempt}.md", brief_dir / f"{args.task}.brief.md"):
+        fd = os.open(bp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, prompt.encode())
+        finally:
+            os.close(fd)
 
     before = porcelain(wt)
     head = git(wt, "rev-parse", "HEAD").strip()
@@ -1590,6 +1604,14 @@ def cmd_list(args):
             applied = "  applied" if meta.get("applied_head") == git(wt, "rev-parse", "HEAD").strip() else ""
             print(f"{root.name}/{wt.name}: base {meta['base'][:10]} ({meta.get('kind', 'head')}), "
                   f"{ahead} attempt commit(s), {len(task_changes(wt))} uncommitted{applied}  {wt}")
+            repo_path = meta.get("repo")
+            if not repo_path:
+                common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+                repo_path = str(Path(common).parent)
+            print(f"  repo: {repo_path}")
+            brief = TASKS / repo.name / f"{wt.name}.brief.md"
+            if brief.exists():
+                print(f"  brief: {brief}")
             entry = last.get((root.name, wt.name))
             if entry:
                 print(f"  last run: {entry.get('outcome')} (exit {entry.get('exit_code')}, "
@@ -1678,6 +1700,8 @@ def cmd_remove(args):
     # --force is needed for the untracked copied policy file even when nothing else changed.
     git(repo, "worktree", "remove", "--force", str(wt))
     meta_path(repo, args.task).unlink(missing_ok=True)
+    for bp in (TASKS / repo.name).glob(f"{args.task}.brief*.md"):
+        bp.unlink(missing_ok=True)
     print(f"removed worktree {wt}")
     if args.delete_branch:
         delete_task_ref(repo, ref)
