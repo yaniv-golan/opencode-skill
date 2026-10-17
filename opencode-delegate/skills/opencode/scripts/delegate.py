@@ -120,6 +120,14 @@ def server_env():
     # OPENCODE_CONFIG_CONTENT is kept because server_plugin_config merges our plugins into it.
     env.pop("OPENCODE_CONFIG", None)
     env.pop("OPENCODE_CONFIG_DIR", None)
+    # The user's own Claude Code instructions and skills must not reach a delegated model: the
+    # global ~/.claude/CLAUDE.md would go into every task's prompt, and skills under ~/.claude/skills
+    # and ~/.agents/skills would be offered to the model. These are the user's private material, not
+    # the repo's; the repo's own AGENTS.md/CLAUDE.md are unaffected. Set after the passthrough
+    # filtering so a caller's value can never override them.
+    env["OPENCODE_DISABLE_CLAUDE_CODE_PROMPT"] = "1"
+    env["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"] = "1"
+    env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
     cfg_home = HOME / "xdg-config"
     cfg_home.mkdir(parents=True, exist_ok=True)
     os.chmod(cfg_home, 0o700)
@@ -295,7 +303,7 @@ def server_start(quiet=False):
                             stdout=log, stderr=log, stdin=subprocess.DEVNULL, env=env,
                             cwd="/", start_new_session=True)
     state = {"pid": proc.pid, "port": PORT, "password": password, "node": node_version(env),
-             "scrub_plugin": plugins_sha256(), "isolated_config": True,
+             "scrub_plugin": plugins_sha256(), "isolation": 2,
              "path_prepend": os.environ.get("OPENCODE_DELEGATE_PATH_PREPEND", ""),
              "started": datetime.now(timezone.utc).isoformat()}
     deadline = time.monotonic() + 90
@@ -909,7 +917,7 @@ def cmd_run(args):
     with server_lock():
         state = server_start(quiet=True)
         want = plugins_sha256()
-        if state.get("scrub_plugin") != want or not state.get("isolated_config"):
+        if state.get("scrub_plugin") != want or state.get("isolation") != 2:
             busy = [k for k, v in (api("GET", "/session/status", state) or {}).items()
                     if (v or {}).get("type") != "idle"]
             if busy:
