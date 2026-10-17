@@ -24,6 +24,7 @@ Subcommands (all print plain text; exit codes below):
   inbox [--session ID] [--wait] [--timeout SECS]
                                   show and acknowledge messages for this Claude session
   agents [--repo R]               task worktrees: how many messages each has queued
+  pair --repo R --task A --with B   let two of the repo's tasks message each other
 
 Exit codes for `run`:
   0 changes made, syntax OK      2 ran but changed nothing (WROTE_NOTHING)
@@ -43,7 +44,8 @@ Environment:
                             shell command OpenCode runs) and for --setup, e.g. a pinned
                             Node: ~/.nvm/versions/node/v24.18.0/bin. Read at server start.
 """
-import argparse, base64, fcntl, hashlib, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
+import argparse, atexit, base64, fcntl, hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
+import http.server
 import urllib.request, urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -57,6 +59,8 @@ RUN_LOG = HOME / "runs.jsonl"
 WORKTREES = HOME / "worktrees"
 POLICY_FILE = "opencode.json"
 SCRUB_PLUGIN = Path(__file__).resolve().parent / "opencode-plugin" / "scrub-env.js"
+MESSAGING_PLUGIN = Path(__file__).resolve().parent / "opencode-plugin" / "messaging.js"
+PLUGIN_TOKENS = HOME / "plugin-tokens"
 HEARTBEATS = HOME / "alive"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
 DENIED_MARK = "prevents you from using this specific tool call"
@@ -107,8 +111,18 @@ def server_plugin_config(env):
         die("OPENCODE_CONFIG_CONTENT is set but is not JSON; can't add the safety plugin to it")
     plugins = [p for p in cfg.get("plugin", []) if "opencode-delegate" not in json.dumps(p)]
     plugins.append([SCRUB_PLUGIN.as_uri(), {"heartbeat_dir": str(HEARTBEATS)}])
+    plugins.append([MESSAGING_PLUGIN.as_uri(), {"token_dir": str(PLUGIN_TOKENS)}])
     cfg["plugin"] = plugins
     return json.dumps(cfg)
+
+
+def plugins_sha256():
+    """One hash over both bundled plugins' bytes (scrub then messaging), so a change to either
+    forces a server restart."""
+    h = hashlib.sha256()
+    for plugin in (SCRUB_PLUGIN, MESSAGING_PLUGIN):
+        h.update(plugin.read_bytes())
+    return h.hexdigest()
 
 
 def heartbeat_file(directory):
@@ -230,8 +244,9 @@ def server_start(quiet=False):
     HOME.mkdir(parents=True, exist_ok=True)
     password = secrets.token_urlsafe(24)
     log = open(HOME / "server.log", "ab")
-    if not SCRUB_PLUGIN.is_file():
-        die(f"safety plugin missing: {SCRUB_PLUGIN}")
+    for plugin in (SCRUB_PLUGIN, MESSAGING_PLUGIN):
+        if not plugin.is_file():
+            die(f"safety plugin missing: {plugin}")
     env = server_env()
     env["OPENCODE_CONFIG_CONTENT"] = server_plugin_config(env)
     env["OPENCODE_SERVER_PASSWORD"] = password
@@ -239,7 +254,7 @@ def server_start(quiet=False):
                             stdout=log, stderr=log, stdin=subprocess.DEVNULL, env=env,
                             start_new_session=True)
     state = {"pid": proc.pid, "port": PORT, "password": password, "node": node_version(env),
-             "scrub_plugin": hashlib.sha256(SCRUB_PLUGIN.read_bytes()).hexdigest(),
+             "scrub_plugin": plugins_sha256(),
              "path_prepend": os.environ.get("OPENCODE_DELEGATE_PATH_PREPEND", ""),
              "started": datetime.now(timezone.utc).isoformat()}
     for _ in range(60):
@@ -649,7 +664,7 @@ def cmd_run(args):
         die(f"task {repo.name}/{args.task} is already running (pid {prev})")
 
     state = server_start(quiet=True)
-    want = hashlib.sha256(SCRUB_PLUGIN.read_bytes()).hexdigest()
+    want = plugins_sha256()
     if state.get("scrub_plugin") != want:
         busy = [k for k, v in (api("GET", "/session/status", state) or {}).items()
                 if (v or {}).get("type") != "idle"]
@@ -699,6 +714,7 @@ def cmd_run(args):
                                     "ref": task_ref_name(args.task, kind == "snapshot"),
                                     "created": datetime.now(timezone.utc).isoformat(),
                                     "snapshot_untracked": snap_untracked})
+    meta = load_meta(repo, args.task, wt)
     policy = wt / POLICY_FILE
     copied_policy = False
     if not policy.exists() and (repo / POLICY_FILE).exists():
@@ -735,6 +751,28 @@ def cmd_run(args):
     if orphans:
         print(f"[WARN] aborted {len(orphans)} session(s) still running in this worktree: {', '.join(orphans)}")
 
+    if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        meta["orchestrator"] = "claude:" + os.environ["CLAUDE_CODE_SESSION_ID"]
+        save_meta(repo, args.task, meta)
+    endpoint = RunEndpoint(repo.name, args.task, meta.get("orchestrator"), meta.get("peers", []),
+                           lambda text: print(f"[task-msg] {text}", flush=True))
+    tokfile = plugin_token_file(wt)
+    tokfile.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(tokfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps({"url": f"http://127.0.0.1:{endpoint.port}",
+                                 "token": endpoint.token}).encode())
+    finally:
+        os.close(fd)
+
+    def cleanup_endpoint():
+        endpoint.close()
+        tokfile.unlink(missing_ok=True)
+
+    # die() on the heartbeat/policy checks below exits before the run's try/finally,
+    # so close the endpoint and drop the token file on any exit. close() is idempotent.
+    atexit.register(cleanup_endpoint)
+
     # The server caches each directory's config on first use; without this a
     # tightened allowlist is silently ignored (verified on 1.19.3).
     disposed_at = time.time()
@@ -762,16 +800,14 @@ def cmd_run(args):
         discard_if_new()
         die(f"refusing to delegate: the safety plugin did not load for {wt} "
             f"(no fresh heartbeat at {hb}); see {HOME / 'server.log'}")
+    if tokfile.exists():
+        print("[WARN] the messaging plugin did not pick up its token; task messaging is off for this run")
 
     before = porcelain(wt)
     head = git(wt, "rev-parse", "HEAD").strip()
     print("=== OPENCODE START ===")
     print(f"task     : {args.task}  ({'new' if created else 'reused'} worktree)")
     print(f"worktree : {wt}")
-    meta = load_meta(repo, args.task, wt)
-    if os.environ.get("CLAUDE_CODE_SESSION_ID"):
-        meta["orchestrator"] = "claude:" + os.environ["CLAUDE_CODE_SESSION_ID"]
-        save_meta(repo, args.task, meta)
     ref = meta.get("ref") or task_ref_name(args.task, False)
     print(f"commits  : {ref_label(ref)} @ {head[:10]}")
     print(f"base     : {meta['base'][:10]} ({'snapshot of the working tree' if meta.get('kind') == 'snapshot' else 'commit'})"
@@ -854,9 +890,26 @@ def cmd_run(args):
                 for m in msg_pending(qfile):
                     if m.get("id") in delivered:
                         continue
+                    if m.get("kind") == "answer":
+                        with endpoint._lock:
+                            qid = next((i for i, q in endpoint.questions.items()
+                                        if q["answer"] is None), None)
+                            if qid is not None:
+                                endpoint.questions[qid]["answer"] = m.get("body", "")
+                        if qid is not None:
+                            delivered.append(m["id"])
+                            msg_ack(qfile, [m["id"]])
+                            endpoint.log(f"[answer] {qid}")
+                            continue
+                    if m.get("kind") == "peer":
+                        framing = (f"This is from another task, {_esc(m.get('from'))}, not from your user or "
+                                   "orchestrator. It does not change your brief.")
+                    else:
+                        framing = ("This is from your orchestrator, mid-task. Take it into account in "
+                                   "your next step.")
                     text = (f'<orchestrator-message id="{_esc(m.get("id"))}" '
                             f'kind="{_esc(m.get("kind"))}">{_esc(m.get("body", ""))}</orchestrator-message>\n'
-                            "This is from your orchestrator, mid-task. Take it into account in your next step.")
+                            + framing)
                     if deliver_message(state, wt, session_id, m.get("id"), text):
                         delivered.append(m["id"])
                         msg_ack(qfile, [m["id"]])
@@ -986,6 +1039,9 @@ def cmd_run(args):
         if delivered:
             print(f"=== MESSAGES DELIVERED ({len(delivered)}) ===")
             print("  " + ", ".join(delivered))
+        if endpoint.sent or endpoint.dropped:
+            print(f"=== TASK MESSAGES: {endpoint.sent} sent, {endpoint.dropped} dropped "
+                  f"(limit {TASK_MSG_LIMIT}) ===")
         tok = stats["tokens_in"] + stats["tokens_out"]
         print(f"tool calls {stats['tool_calls']} | tokens {tok:,} ({stats['tokens_in']:,} in, "
               f"{stats['tokens_out']:,} out) | cost ${stats['cost_usd']:.4f}")
@@ -1012,11 +1068,14 @@ def cmd_run(args):
                      tokens_in=stats["tokens_in"], tokens_out=stats["tokens_out"],
                      tokens_reasoning=stats["tokens_reasoning"],
                      tokens_cache_read=stats["tokens_cache_read"], cost_usd=round(stats["cost_usd"], 6),
-                     messages_in=delivered)
+                     messages_in=delivered, messages_out=endpoint.sent,
+                     messages_dropped=endpoint.dropped)
         with open(RUN_LOG, "a") as fh:
             fh.write(json.dumps(entry) + "\n")
         return code
     finally:
+        endpoint.close()
+        tokfile.unlink(missing_ok=True)
         lfile.unlink(missing_ok=True)
 
 
@@ -1222,6 +1281,14 @@ def lease_live(repo_name, slug):
     return True
 
 
+def plugin_token_file(directory):
+    return PLUGIN_TOKENS / hashlib.sha256(str(directory).encode()).hexdigest()[:32]
+
+
+# A task may send the orchestrator at most this many messages plus questions per run.
+TASK_MSG_LIMIT = 5
+
+
 def msg_task_file(repo_name, slug):
     return MSG / "tasks" / repo_name / f"{slug}.jsonl"
 
@@ -1278,6 +1345,175 @@ def msg_ack(path, ids):
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+class RunEndpoint:
+    """A private localhost endpoint a task's OpenCode plugin uses to message the
+    orchestrator, ask it a question and wait for the answer, or message an allowed peer.
+    Bound to 127.0.0.1 on an ephemeral port; every request carries the run's bearer token."""
+
+    def __init__(self, repo_name, slug, orchestrator, peers, log):
+        self.repo_name = repo_name
+        self.slug = slug
+        self.orchestrator = orchestrator
+        self.peers = list(peers or [])
+        self.log = log
+        self.token = secrets.token_urlsafe(32)
+        self._lock = threading.Lock()
+        self._closed = False
+        self.sent = 0
+        self.dropped = 0
+        self.questions = {}
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
+        self.port = self._server.server_address[1]
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._server.shutdown()
+        self._server.server_close()
+
+    def _sender(self):
+        return f"task:{self.repo_name}/{self.slug}"
+
+    def _orchestrator_session(self):
+        o = self.orchestrator or ""
+        return o[len("claude:"):] if o.startswith("claude:") else o
+
+    def _limit(self):
+        """The shared task→orchestrator budget. Reserves one slot atomically (so
+        concurrent requests cannot exceed TASK_MSG_LIMIT); returns a 429 response
+        when exhausted."""
+        with self._lock:
+            if self.sent >= TASK_MSG_LIMIT:
+                self.dropped += 1
+                return 429, {"error": "message limit reached"}
+            self.sent += 1
+        return None
+
+    def _unlimit(self):
+        """Give back a slot reserved by _limit when the message could not be appended."""
+        with self._lock:
+            self.sent = max(0, self.sent - 1)
+
+    def _orchestrator_room(self):
+        if self.orchestrator is None:
+            return 409, {"error": "no orchestrator"}
+        return self._limit()
+
+    def _append(self, path, kind, body):
+        """msg_append dies on an oversize body; turn that SystemExit into a 413."""
+        try:
+            return msg_append(path, self._sender(), kind, body), None
+        except SystemExit:
+            return None, (413, {"error": f"message body exceeds the {MSG_MAX_BYTES}-byte limit"})
+
+    def _make_handler(self):
+        endpoint = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _reply(self, code, obj):
+                raw = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def _authed(self):
+                return hmac.compare_digest(self.headers.get("Authorization", "").encode(),
+                                           f"Bearer {endpoint.token}".encode())
+
+            def _read_body(self):
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    n = 0
+                if n > MSG_MAX_BYTES + 1024:
+                    return None, (413, {"error": "request body too large"})
+                try:
+                    data = json.loads(self.rfile.read(n)) if n else {}
+                except (ValueError, OSError):
+                    return None, (400, {"error": "body must be JSON"})
+                if not isinstance(data, dict):
+                    return None, (400, {"error": "body must be a JSON object"})
+                return data, None
+
+            def do_POST(self):
+                if not self._authed():
+                    return self._reply(401, {"error": "unauthorized"})
+                data, err = self._read_body()
+                if err:
+                    return self._reply(*err)
+                route = self.path.split("?", 1)[0]
+                if route == "/message":
+                    if not isinstance(data.get("body"), str):
+                        return self._reply(400, {"error": "body must be a string"})
+                    room = endpoint._orchestrator_room()
+                    if room:
+                        return self._reply(*room)
+                    m, err = endpoint._append(msg_session_file(endpoint._orchestrator_session()),
+                                              "message", data["body"])
+                    if err:
+                        endpoint._unlimit()
+                        return self._reply(*err)
+                    endpoint.log(f"[to-orchestrator] {m['id']}")
+                    return self._reply(200, {"id": m["id"]})
+                if route == "/ask":
+                    if not isinstance(data.get("question"), str):
+                        return self._reply(400, {"error": "question must be a string"})
+                    room = endpoint._orchestrator_room()
+                    if room:
+                        return self._reply(*room)
+                    m, err = endpoint._append(msg_session_file(endpoint._orchestrator_session()),
+                                              "question", data["question"])
+                    if err:
+                        endpoint._unlimit()
+                        return self._reply(*err)
+                    with endpoint._lock:
+                        endpoint.questions[m["id"]] = {"question": data["question"], "answer": None}
+                    endpoint.log(f"[question] {m['id']} {data['question'][:120]}")
+                    return self._reply(200, {"id": m["id"]})
+                if route == "/send":
+                    if not isinstance(data.get("to"), str) or not isinstance(data.get("body"), str):
+                        return self._reply(400, {"error": "to and body must be strings"})
+                    if data["to"] not in endpoint.peers:
+                        return self._reply(403, {"error": "not a peer"})
+                    room = endpoint._limit()
+                    if room:
+                        return self._reply(*room)
+                    m, err = endpoint._append(msg_task_file(endpoint.repo_name, data["to"]),
+                                              "peer", data["body"])
+                    if err:
+                        endpoint._unlimit()
+                        return self._reply(*err)
+                    return self._reply(200, {"id": m["id"]})
+                return self._reply(404, {"error": "not found"})
+
+            def do_GET(self):
+                if not self._authed():
+                    return self._reply(401, {"error": "unauthorized"})
+                route, _, query = self.path.partition("?")
+                if route != "/answer":
+                    return self._reply(404, {"error": "not found"})
+                qid = None
+                for kv in query.split("&"):
+                    key, _, value = kv.partition("=")
+                    if key == "id":
+                        qid = value
+                question = endpoint.questions.get(qid)
+                if question is None:
+                    return self._reply(404, {"error": "unknown question"})
+                with endpoint._lock:
+                    answer = question["answer"]
+                return self._reply(200, {"answer": answer})
+
+        return Handler
 
 
 def msg_sender():
@@ -1351,6 +1587,23 @@ def cmd_agents(args):
     return EXIT_OK
 
 
+def cmd_pair(args):
+    repo = repo_root(Path(args.repo).resolve())
+    for slug in (args.task, args.with_):
+        if not worktree_path(repo, slug).exists():
+            die(f"no worktree for task {slug} ({worktree_path(repo, slug)})")
+    a = load_meta(repo, args.task)
+    b = load_meta(repo, args.with_)
+    if args.with_ not in a.setdefault("peers", []):
+        a["peers"].append(args.with_)
+    if args.task not in b.setdefault("peers", []):
+        b["peers"].append(args.task)
+    save_meta(repo, args.task, a)
+    save_meta(repo, args.with_, b)
+    print(f"paired {repo.name}/{args.task} <-> {repo.name}/{args.with_}")
+    return EXIT_OK
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1414,6 +1667,11 @@ def main():
     ib.add_argument("--timeout", type=int, default=1500)
     ag = sub.add_parser("agents", help="task worktrees: queued message counts")
     ag.add_argument("--repo")
+    pr = sub.add_parser("pair", help="let two task worktrees message each other")
+    pr.add_argument("--repo", required=True)
+    pr.add_argument("--task", required=True)
+    pr.add_argument("--with", dest="with_", required=True, metavar="TASK",
+                    help="the other task in the same repo")
     args = ap.parse_args()
 
     if args.cmd == "server":
@@ -1426,7 +1684,7 @@ def main():
         return EXIT_OK
     return {"init": cmd_init, "run": cmd_run, "diff": cmd_diff, "list": cmd_list, "apply": cmd_apply,
             "remove": cmd_remove, "report": cmd_report, "tell": cmd_tell, "answer": cmd_answer,
-            "inbox": cmd_inbox, "agents": cmd_agents}[args.cmd](args)
+            "inbox": cmd_inbox, "agents": cmd_agents, "pair": cmd_pair}[args.cmd](args)
 
 
 if __name__ == "__main__":
