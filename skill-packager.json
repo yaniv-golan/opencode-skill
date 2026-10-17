@@ -3,7 +3,7 @@
     {
       "name": "opencode",
       "source_path": "opencode-delegate/skills/opencode",
-      "description": "Delegate coding work to the OpenCode CLI (free models such as DeepSeek V4.1 Flash via OpenCode Zen) while Claude plans, writes the brief, supervises and reviews. Each task runs in its own git worktree and branch through one shared `opencode serve`, under a default-deny command policy, so several tasks can run in parallel without touching the user's checkout. Use when the user types /opencode, asks to \"have OpenCode do it\", \"delegate to opencode\", \"let the free model code this\", or when the project's CLAUDE.md says coding is delegated to OpenCode. Also covers setting a repo up for delegation (opencode.json policy), choosing the OpenCode model, and reporting past runs.",
+      "description": "Delegate coding work to the OpenCode CLI (free models such as DeepSeek V4.1 Flash via OpenCode Zen) while Claude plans, writes the brief, supervises and reviews. Each task runs in its own git worktree and branch through one shared `opencode serve`, under a default-deny command policy, so several tasks can run in parallel without touching the user's checkout. Use when the user types /opencode or /opencode-delegate:opencode, asks to \"have OpenCode do it\", \"delegate to opencode\", \"let the free model code this\", or when the project's CLAUDE.md says coding is delegated to OpenCode. Also covers setting a repo up for delegation (opencode.json policy), choosing the OpenCode model, and reporting past runs.",
       "has_scripts": true,
       "has_references": false,
       "has_assets": false,

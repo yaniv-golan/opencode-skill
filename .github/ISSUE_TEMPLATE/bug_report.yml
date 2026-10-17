@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in opencode-delegate didn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: For security problems, don't file an issue; see SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations: { required: true }
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The command or slash command you ran, and the smallest repo state that shows it.
+    validations: { required: true }
+  - type: input
+    id: plugin
+    attributes:
+      label: Plugin version
+      description: From `claude plugin list`
+    validations: { required: true }
+  - type: input
+    id: opencode
+    attributes:
+      label: OpenCode version
+      description: "`delegate.py server status` prints it, or `opencode --version`"
+    validations: { required: true }
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version and OS
+      placeholder: e.g. 2.1.302, macOS 26.5
+    validations: { required: true }
+  - type: input
+    id: exit
+    attributes:
+      label: delegate.py exit code and outcome line
+      placeholder: e.g. exit 4, "=== OPENCODE ERROR ..."
+  - type: dropdown
+    id: policy
+    attributes:
+      label: Is the repo's opencode.json committed?
+      options: ["yes", "no (untracked)", "no opencode.json"]
+  - type: dropdown
+    id: dotopencode
+    attributes:
+      label: Is there a .opencode/ directory in the repo or above it?
+      options: ["no", "yes", "don't know"]

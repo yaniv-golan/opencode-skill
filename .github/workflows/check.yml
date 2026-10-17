@@ -1,0 +1,43 @@
+name: check
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: delegate.py compiles on the oldest supported Python
+        run: python -m py_compile opencode-delegate/skills/opencode/scripts/delegate.py
+      - name: SKILL.md stays under the compaction limit
+        run: |
+          n=$(python -c "import sys; print(len(open(sys.argv[1], encoding='utf-8').read()))" opencode-delegate/skills/opencode/SKILL.md)
+          echo "SKILL.md: $n characters"
+          test "$n" -lt 19900
+      - name: Version is identical in all five places
+        run: |
+          python - <<'PY'
+          import json, re, sys
+          v = {
+              "skill-packager.json": json.load(open("skill-packager.json"))["version"],
+              "VERSION": open("VERSION").read().strip(),
+              "marketplace.json": json.load(open(".claude-plugin/marketplace.json"))["metadata"]["version"],
+              "plugin.json": json.load(open("opencode-delegate/.claude-plugin/plugin.json"))["version"],
+              "SKILL.md": re.search(r"^metadata:\n  version: (\S+)", open("opencode-delegate/skills/opencode/SKILL.md").read(), re.M).group(1),
+          }
+          print(v)
+          sys.exit(len(set(v.values())) != 1)
+          PY
+      - name: Manifests are valid JSON
+        run: |
+          for f in .claude-plugin/marketplace.json opencode-delegate/.claude-plugin/plugin.json skill-packager.json evals/opencode/*.json; do
+            python -m json.tool "$f" > /dev/null || { echo "invalid JSON: $f"; exit 1; }
+          done
