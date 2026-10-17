@@ -25,6 +25,7 @@ Subcommands (all print plain text; exit codes below):
   inbox [--session ID]            show and acknowledge messages for this Claude session (one-shot)
   wait --repo R [--task T ...] [--max SECS] [--stream] [--session ID]
                                   wait for detached runs: print their messages and results
+  attach --repo R --task SLUG [--fork]   open OpenCode's viewer on a task's session (your terminal)
   agents [--repo R]               task worktrees: how many messages each has queued
   hook                            deliver this session's pending messages to a Claude Code hook
   pair --repo R --task A --with B   let two of the repo's tasks message each other
@@ -2268,14 +2269,15 @@ def lease_run_id(repo_name, task):
 
 
 def log_excerpt(repo_name, task, run_id):
-    """The run log from its `=== OPENCODE ` banner to the end, or None if the log is gone."""
+    """The run log from its outcome banner to the end, or None if the log is gone. The first
+    `=== OPENCODE ` line is the START header, so start at the last one that is not it."""
     try:
         text = (LOGS / repo_name / task / f"{run_id}.log").read_text()
     except OSError:
         return None
     lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if line.startswith("=== OPENCODE "):
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("=== OPENCODE ") and lines[i] != "=== OPENCODE START ===":
             return "\n".join(lines[i:])
     return text
 
@@ -2467,6 +2469,41 @@ def cmd_wait(args):
         time.sleep(1)
 
 
+def cmd_attach(args):
+    """Open OpenCode's TUI on a task's session, in the caller's own terminal. `attach` replaces
+    this process, so it never returns."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        die("attach opens an interactive viewer; run it in your own terminal")
+    repo = repo_root(Path(args.repo).resolve())
+    session_id = None
+    if lease_live(repo.name, args.task):
+        try:
+            session_id = json.loads(lease_path(repo.name, args.task).read_text()).get("session")
+        except (OSError, ValueError):
+            session_id = None
+    if not session_id:
+        for entry in run_log_entries():
+            if (entry.get("project") == repo.name and entry.get("task") == args.task
+                    and entry.get("session")):
+                session_id = entry["session"]
+    if not session_id:
+        die(f"no session found for {repo.name}/{args.task}")
+    state = _state()
+    if not state.get("password") or not server_healthy(state):
+        die("the delegate server is not running")
+    worktree = worktree_path(repo, args.task)
+    print(f"watching {repo.name}/{args.task} session {session_id}", file=sys.stderr)
+    if not args.fork:
+        print("typing here sends messages into the task's session and steers it; to only watch, "
+              "don't type (or use --fork to open a copy)", file=sys.stderr)
+    env = dict(os.environ)
+    env["OPENCODE_SERVER_PASSWORD"] = state["password"]
+    cmd = ["opencode", "attach", URL, "--dir", str(worktree), "--session", session_id]
+    if args.fork:
+        cmd.append("--fork")
+    os.execvpe("opencode", cmd, env)
+
+
 def cmd_hook(args):
     """Deliver this session's pending task messages at a tool step. Claude Code pipes one JSON
     object on stdin and expects at most one JSON line back; a broken hook must never disturb the
@@ -2618,6 +2655,11 @@ def main():
     wa.add_argument("--session")
     wa.add_argument("--since", type=int, default=300,
                     help="also report runs that finished this many seconds before wait started (default 300)")
+    at = sub.add_parser("attach", help="open OpenCode's viewer on a task's session (your terminal only)")
+    at.add_argument("--repo", required=True)
+    at.add_argument("--task", required=True)
+    at.add_argument("--fork", action="store_true",
+                    help="open a copy of the session instead of steering the task's own")
     ag = sub.add_parser("agents", help="task worktrees: queued message counts")
     ag.add_argument("--repo")
     pr = sub.add_parser("pair", help="let two task worktrees message each other")
@@ -2655,7 +2697,7 @@ def main():
         return {"init": cmd_init, "run": cmd_run, "diff": cmd_diff, "list": cmd_list, "apply": cmd_apply,
                 "remove": cmd_remove, "land": cmd_land, "report": cmd_report, "tell": cmd_tell,
                 "answer": cmd_answer, "inbox": cmd_inbox, "wait": cmd_wait, "agents": cmd_agents,
-                "pair": cmd_pair}[args.cmd](args)
+                "pair": cmd_pair, "attach": cmd_attach}[args.cmd](args)
     except _Interrupted as e:
         print(f"=== OPENCODE INTERRUPTED before the run started (signal {e}) ===", flush=True)
         return EXIT_ERROR
