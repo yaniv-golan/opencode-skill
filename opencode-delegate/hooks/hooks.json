@@ -1,0 +1,9 @@
+{
+  "description": "Deliver opencode-delegate task messages (notes, questions) to the orchestrating Claude session",
+  "hooks": {
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "sh",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/inbox-hook.sh"], "timeout": 10}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "sh",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/inbox-hook.sh"], "timeout": 10}]}]
+  }
+}

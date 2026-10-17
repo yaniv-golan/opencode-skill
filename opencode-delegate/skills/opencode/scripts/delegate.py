@@ -24,6 +24,7 @@ Subcommands (all print plain text; exit codes below):
   inbox [--session ID] [--wait] [--timeout SECS]
                                   show and acknowledge messages for this Claude session
   agents [--repo R]               task worktrees: how many messages each has queued
+  hook                            deliver this session's pending messages to a Claude Code hook
   pair --repo R --task A --with B   let two of the repo's tasks message each other
 
 Exit codes for `run`:
@@ -1304,14 +1305,19 @@ def msg_append(path, sender, kind, body):
         die(f"message body exceeds the {MSG_MAX_BYTES}-byte limit")
     msg = {"id": secrets.token_hex(8), "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
            "from": sender, "kind": kind, "body": body}
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = os.open(path.with_suffix(".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        os.write(fd, (json.dumps(msg) + "\n").encode())
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(msg) + "\n").encode())
+        finally:
+            os.close(fd)
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
     return msg
 
 
@@ -1336,15 +1342,36 @@ def msg_pending(path):
 
 
 def msg_ack(path, ids):
-    ack = Path(path).with_suffix(".acked")
-    ack.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(ack, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    path = Path(path)
+    ack = path.with_suffix(".acked")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = os.open(path.with_suffix(".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        os.write(fd, "".join(f"{i}\n" for i in ids).encode())
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        fd = os.open(ack, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, "".join(f"{i}\n" for i in ids).encode())
+        finally:
+            os.close(fd)
+        acknowledged = {line.strip() for line in ack.read_text().splitlines() if line.strip()}
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            lines = []
+        ids_in_file = []
+        for line in lines:
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(m, dict) and m.get("id"):
+                ids_in_file.append(m["id"])
+        if ids_in_file and all(i in acknowledged for i in ids_in_file):
+            ack.unlink()
+            path.unlink()
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
 
 
 class RunEndpoint:
@@ -1526,14 +1553,36 @@ def _esc(value):
             .replace('"', "&quot;"))
 
 
-def msg_print(messages):
+def msg_answer_hint(sender):
+    """The `answer` command for a question, or None when the asker's worktree is gone."""
+    try:
+        repo_name, slug = str(sender).split(":", 1)[1].split("/", 1)
+    except (IndexError, ValueError):
+        return None
+    wt = WORKTREES / repo_name / slug
+    if not wt.exists():
+        return None
+    return (f'To answer: python3 {Path(__file__).resolve()} answer --repo {repo_root(wt)} '
+            f'--task {slug} "<your answer>"')
+
+
+def msg_format(messages):
+    lines = []
     for m in messages:
-        body = _esc(m.get("body", ""))
-        print(f'<task-message id="{_esc(m.get("id"))}" from="{_esc(m.get("from"))}" '
-              f'kind="{_esc(m.get("kind"))}" ts="{_esc(m.get("ts"))}">')
-        print(body)
-        print("</task-message>")
-    print(FRAMING)
+        lines.append(f'<task-message id="{_esc(m.get("id"))}" from="{_esc(m.get("from"))}" '
+                     f'kind="{_esc(m.get("kind"))}" ts="{_esc(m.get("ts"))}">')
+        lines.append(_esc(m.get("body", "")))
+        lines.append("</task-message>")
+        if m.get("kind") == "question":
+            hint = msg_answer_hint(m.get("from"))
+            if hint:
+                lines.append(hint)
+    lines.append(FRAMING)
+    return "\n".join(lines)
+
+
+def msg_print(messages):
+    print(msg_format(messages))
 
 
 def cmd_tell(args):
@@ -1569,6 +1618,34 @@ def cmd_inbox(args):
             print(f"no messages within {args.timeout}s")
             return EXIT_NOTHING
         time.sleep(1)
+
+
+def cmd_hook(args):
+    """Deliver this session's pending task messages at a tool step. Claude Code pipes one JSON
+    object on stdin and expects at most one JSON line back; a broken hook must never disturb the
+    session, so any error is swallowed."""
+    try:
+        data = json.loads(sys.stdin.read() or "{}")
+        if data.get("agent_id"):
+            return EXIT_OK
+        session = data.get("session_id")
+        event = data.get("hook_event_name")
+        path = msg_session_file(session) if session else None
+        pending = msg_pending(path) if path else []
+        if not pending:
+            return EXIT_OK
+        taken = []
+        for m in pending:
+            text = msg_format(taken + [m])
+            if taken and len(text) >= 9000:
+                break
+            taken.append(m)
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
+                                                 "additionalContext": msg_format(taken)}}))
+        msg_ack(path, [m["id"] for m in taken])
+    except Exception:
+        pass
+    return EXIT_OK
 
 
 def cmd_agents(args):
@@ -1672,6 +1749,7 @@ def main():
     pr.add_argument("--task", required=True)
     pr.add_argument("--with", dest="with_", required=True, metavar="TASK",
                     help="the other task in the same repo")
+    sub.add_parser("hook", help="deliver this session's pending task messages (Claude Code hook)")
     args = ap.parse_args()
 
     if args.cmd == "server":
@@ -1682,6 +1760,8 @@ def main():
         for mid, free, ctx, tools in sorted(list_models(state), key=lambda m: (not m[1], m[0])):
             print(f"{mid:50} {'FREE' if free else '    '} ctx={ctx} tools={tools}")
         return EXIT_OK
+    if args.cmd == "hook":
+        return cmd_hook(args)
     return {"init": cmd_init, "run": cmd_run, "diff": cmd_diff, "list": cmd_list, "apply": cmd_apply,
             "remove": cmd_remove, "report": cmd_report, "tell": cmd_tell, "answer": cmd_answer,
             "inbox": cmd_inbox, "agents": cmd_agents, "pair": cmd_pair}[args.cmd](args)
