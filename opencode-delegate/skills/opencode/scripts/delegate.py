@@ -21,7 +21,7 @@ Subcommands (all print plain text; exit codes below):
   report [--since DAYS] [--project NAME] [--fails]
   tell --repo R --task SLUG TEXT   queue a message for a task's OpenCode agent
   answer --repo R --task SLUG TEXT queue an answer for a task's OpenCode agent
-  inbox [--session ID] [--wait] [--timeout SECS]
+  inbox [--session ID] [--wait] [--timeout SECS] [--repo R]
                                   show and acknowledge messages for this Claude session
   agents [--repo R]               task worktrees: how many messages each has queued
   hook                            deliver this session's pending messages to a Claude Code hook
@@ -1835,13 +1835,25 @@ def cmd_inbox(args):
     if not session:
         die("no session id: pass --session or set CLAUDE_CODE_SESSION_ID")
     path = msg_session_file(session)
-    deadline = time.time() + args.timeout
+    start = time.time()
+    deadline = start + args.timeout
+    name = repo_root(Path(args.repo).resolve()).name if args.repo and args.wait else None
+    seen_live = False
     while True:
         if msg_claim(path, list, msg_print):
             return EXIT_OK
         if not args.wait:
             print("no messages")
             return EXIT_NOTHING
+        if name:
+            live = any(lease_live(name, p.stem) for p in (LEASES / name).glob("*.json"))
+            if live:
+                seen_live = True
+            elif seen_live or time.time() - start >= 60:
+                if msg_claim(path, list, msg_print):
+                    return EXIT_OK
+                print(f"no task of {name} is running; no messages")
+                return EXIT_NOTHING
         if time.time() >= deadline:
             print(f"no messages within {args.timeout}s")
             return EXIT_NOTHING
@@ -1981,6 +1993,7 @@ def main():
     ib.add_argument("--session")
     ib.add_argument("--wait", action="store_true")
     ib.add_argument("--timeout", type=int, default=1500)
+    ib.add_argument("--repo", help="with --wait: also stop when no task of this repo is running")
     ag = sub.add_parser("agents", help="task worktrees: queued message counts")
     ag.add_argument("--repo")
     pr = sub.add_parser("pair", help="let two task worktrees message each other")
