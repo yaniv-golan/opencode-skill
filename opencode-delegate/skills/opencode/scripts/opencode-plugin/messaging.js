@@ -7,18 +7,18 @@
 // token file, read once on load and unlinked immediately; without it the tools
 // still exist but report that messaging is unavailable.
 //
-// Orchestrator messages reach the model as tagged text, so any tool output
-// containing the same tags is escaped to stop file contents or command output
-// from imitating a real message.
+// Orchestrator and peer messages reach the model as tagged text, so any tool
+// output containing the same tags is escaped to stop file contents or command
+// output from imitating a real message.
 import { readFileSync, unlinkSync } from "node:fs";
 import { createHash, createHmac } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const TAGGED = /<\/?(?:orchestrator-message|task-message)/i;
-const ESCAPE = /<(?=\/?(?:orchestrator-message|task-message))/gi;
-const ENVELOPE = /<\/?orchestrator-message\b[^>]*>/gi;
+const TAGGED = /<\/?(?:orchestrator-message|peer-message|task-message)/i;
+const ESCAPE = /<(?=\/?(?:orchestrator-message|peer-message|task-message))/gi;
+const ENVELOPE = /<\/?(?:orchestrator-message|peer-message)\b[^>]*>/gi;
 
 export const OpencodeDelegateMessaging = async ({ directory }, options = {}) => {
   let url = null;
@@ -47,20 +47,21 @@ export const OpencodeDelegateMessaging = async ({ directory }, options = {}) => 
   // or wrong. Without a token there is no valid signature at all.
   const signId = (id) => createHmac("sha256", token).update(id).digest("hex").slice(0, 32);
   const sanitize = (text) => {
-    let invalid = false;
+    const invalid = {};
     return text.replace(ENVELOPE, (tag) => {
+      const name = /^<\/?([a-z-]+)/i.exec(tag)[1].toLowerCase();
       if (tag.startsWith("</")) {
-        if (!invalid) return tag;
-        invalid = false;
+        if (!invalid[name]) return tag;
+        invalid[name] = false;
         return "&lt;" + tag.slice(1);
       }
       const id = /(?:^|\s)id="([^"]*)"/.exec(tag);
       const sig = /(?:^|\s)sig="([^"]*)"/.exec(tag);
       if (token && id && sig && sig[1] === signId(id[1])) {
-        invalid = false;
+        invalid[name] = false;
         return tag;
       }
-      invalid = true;
+      invalid[name] = true;
       return "&lt;" + tag.slice(1);
     });
   };
