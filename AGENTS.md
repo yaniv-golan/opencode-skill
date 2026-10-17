@@ -158,6 +158,8 @@ Stop the test server (`delegate.py server stop` with the same env) and remove it
 ## Git and publishing
 
 - Work on a named branch. `upstream` is pcx-wave's repo; never push to it.
+- In a clone with an `upstream` remote, `gh` targets pcx-wave's repo by default. Run
+  `gh repo set-default yaniv-golan/opencode-skill` once, or pass `--repo` to every `gh` command.
 - Stage files by name. Don't use `git add -A`, `-u` or `.` unless you've confirmed every line of
   `git status` is in scope.
 - Commit messages and tracked files must not contain AI session URLs, `Co-Authored-By` lines for
