@@ -11,8 +11,10 @@ Subcommands (all print plain text; exit codes below):
   models                          list models the server offers (free ones marked)
   init REPO [--allow CMD ...]     write a default-deny opencode.json into REPO
   run --repo R --task SLUG (--prompt TEXT | --prompt-file F) [options]
-  diff --repo R --task SLUG       full diff of the task worktree vs its base
-  list [--repo R]                 task worktrees and their change counts
+  diff --repo R --task SLUG [--last]   OpenCode's changes vs the task's base (or the last attempt)
+  apply --repo R --task SLUG [--check] [--3way]
+                                  apply the task's changes to the main checkout's working tree
+  list [--repo R]                 task worktrees: base, attempts, uncommitted changes
   remove --repo R --task SLUG [--delete-branch] [--force]
   report [--since DAYS] [--project NAME] [--fails]
 
@@ -21,6 +23,7 @@ Exit codes for `run`:
   3 timed out (session aborted)  4 OpenCode/model error
   5 changes made but syntax check failed
   1 usage / setup error (nothing was delegated)
+Exit codes for `apply`: 0 applied (or --check clean), 2 nothing to apply, 6 conflicts (nothing changed)
 
 Environment:
   OPENCODE_DELEGATE_MODEL   default model (else opencode/deepseek-v4.1-flash-free)
@@ -52,6 +55,12 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
 DENIED_MARK = "prevents you from using this specific tool call"
 
 EXIT_OK, EXIT_USAGE, EXIT_NOTHING, EXIT_TIMEOUT, EXIT_ERROR, EXIT_SYNTAX = 0, 1, 2, 3, 4, 5
+EXIT_CONFLICT = 6
+TASKS = HOME / "tasks"
+BOT = ["-c", "user.name=opencode-delegate", "-c", "user.email=opencode-delegate@localhost",
+       "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"]
+SECRET_NAME_RE = re.compile(r"^(\.env(\..*)?|.*\.(pem|key|p12|pfx|kdbx|keystore|jks)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|"
+                            r"credentials(\..*)?|\.netrc|\.npmrc|\.pypirc)$", re.I)
 
 
 def toolchain_env(base=None):
@@ -403,6 +412,81 @@ def task_changes(wt):
     return {f: st for f, st in porcelain(wt).items() if not (f == POLICY_FILE and st == "??")}
 
 
+def git_env(repo, env_extra, *args, check=True):
+    env = dict(os.environ, **env_extra)
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, env=env)
+    if check and r.returncode != 0:
+        die(f"git {' '.join(args)} failed: {r.stderr.strip()}")
+    return r.stdout
+
+
+def meta_path(repo, slug):
+    return TASKS / repo.name / f"{slug}.json"
+
+
+def load_meta(repo, slug, wt=None):
+    try:
+        return json.loads(meta_path(repo, slug).read_text())
+    except (OSError, ValueError):
+        if wt is None:
+            return {}
+        # Task from before metadata existed: its base is where it forked from the main checkout.
+        return {"base": merge_base(repo, wt) or git(wt, "rev-parse", "HEAD").strip(), "kind": "head"}
+
+
+def save_meta(repo, slug, meta):
+    p = meta_path(repo, slug)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(meta, indent=2))
+
+
+def snapshot_working_tree(repo, allow_secret_files):
+    """Commit the main checkout's current state (tracked changes + untracked, non-ignored files)
+    WITHOUT touching its index, working tree or stash: a temporary index file is used.
+    Returns (commit, untracked_files, untracked_bytes); commit is HEAD when nothing differs."""
+    untracked = [f for f in git(repo, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if f]
+    secret = [f for f in untracked if SECRET_NAME_RE.match(Path(f).name)]
+    if secret and not allow_secret_files:
+        die("refusing to snapshot: untracked files that look like secrets would be copied into "
+            f"OpenCode's worktree: {', '.join(secret)}. Add them to .gitignore, move them, or pass "
+            "--allow-secret-files if they are safe")
+    size = sum((repo / f).stat().st_size for f in untracked if (repo / f).is_file())
+    HOME.mkdir(parents=True, exist_ok=True)
+    idx = HOME / f"snapshot-index-{os.getpid()}"
+    env = {"GIT_INDEX_FILE": str(idx)}
+    try:
+        git_env(repo, env, "read-tree", "HEAD")
+        git_env(repo, env, "add", "-A")
+        tree = git_env(repo, env, "write-tree").strip()
+    finally:
+        idx.unlink(missing_ok=True)
+    head = git(repo, "rev-parse", "HEAD").strip()
+    if tree == git(repo, "rev-parse", "HEAD^{tree}").strip():
+        return head, untracked, size
+    commit = git_env(repo, {"GIT_AUTHOR_NAME": "opencode-delegate", "GIT_AUTHOR_EMAIL": "opencode-delegate@localhost",
+                            "GIT_COMMITTER_NAME": "opencode-delegate", "GIT_COMMITTER_EMAIL": "opencode-delegate@localhost"},
+                     "commit-tree", tree, "-p", head, "-m", "opencode-delegate: snapshot of the working tree").strip()
+    return commit, untracked, size
+
+
+def commit_task_changes(wt, message):
+    """Commit everything OpenCode (or a reviewer) left in the worktree, except an untracked
+    policy file the script copied in. Hooks are disabled: they would run repo code with the
+    user's permissions. Returns the new commit or None."""
+    changes = task_changes(wt)
+    if not changes:
+        return None
+    exclude = [f":(exclude){POLICY_FILE}"] if porcelain(wt).get(POLICY_FILE) == "??" else []
+    git(wt, "add", "-A", "--", ".", *exclude)
+    git(wt, *BOT, "commit", "--no-verify", "-q", "-m", message)
+    return git(wt, "rev-parse", "HEAD").strip()
+
+
+def attempt_count(wt, base):
+    log = git(wt, "log", "--format=%s", f"{base}..HEAD", check=False)
+    return sum(1 for line in log.splitlines() if line.startswith("opencode attempt "))
+
+
 def porcelain(wt):
     out = {}
     for line in git(wt, "status", "--porcelain=v1", "--untracked-files=all").splitlines():
@@ -478,6 +562,11 @@ def cmd_run(args):
         die("empty prompt")
     model = args.model or os.environ.get("OPENCODE_DELEGATE_MODEL") or DEFAULT_MODEL
     repo = repo_root(Path(args.repo).resolve())
+    if args.from_working_tree and args.base:
+        die("--from-working-tree and --base are mutually exclusive")
+    if args.from_working_tree and worktree_path(repo, args.task).exists():
+        die(f"--from-working-tree only applies to a new task; {args.task} already has a worktree "
+            f"(continue it without the flag, or pick a new --task)")
 
     state = server_start(quiet=True)
     want = hashlib.sha256(SCRUB_PLUGIN.read_bytes()).hexdigest()
@@ -499,6 +588,7 @@ def cmd_run(args):
         if created:
             git(repo, "worktree", "remove", "--force", str(wt), check=False)
             git(repo, "branch", "-D", f"opencode/{args.task}", check=False)
+            meta_path(repo, args.task).unlink(missing_ok=True)
 
     def refuse(problems, where):
         discard_if_new()
@@ -512,7 +602,21 @@ def cmd_run(args):
         problems = check_policy(repo / POLICY_FILE)
         if problems and not args.unsafe_policy:
             refuse(problems, repo)
-    wt, created = ensure_worktree(repo, args.task, args.base)
+    base_ref, kind, snap_untracked = args.base or "HEAD", "head", []
+    if args.from_working_tree and not worktree_path(repo, args.task).exists():
+        base_ref, snap_untracked, snap_bytes = snapshot_working_tree(repo, args.allow_secret_files)
+        kind = "snapshot" if base_ref != git(repo, "rev-parse", "HEAD").strip() else "head"
+        print(f"[snapshot] {'working tree captured' if kind == 'snapshot' else 'working tree is clean; using HEAD'}"
+              f"; untracked files included: {len(snap_untracked)} ({snap_bytes:,} bytes)")
+        for f in snap_untracked[:30]:
+            print(f"[snapshot]   + {f}")
+        if len(snap_untracked) > 30:
+            print(f"[snapshot]   … {len(snap_untracked) - 30} more")
+    wt, created = ensure_worktree(repo, args.task, base_ref)
+    if created:
+        save_meta(repo, args.task, {"base": git(wt, "rev-parse", "HEAD").strip(), "kind": kind,
+                                    "created": datetime.now(timezone.utc).isoformat(),
+                                    "snapshot_untracked": snap_untracked})
     policy = wt / POLICY_FILE
     copied_policy = False
     if not policy.exists() and (repo / POLICY_FILE).exists():
@@ -542,8 +646,7 @@ def cmd_run(args):
         if r.returncode:
             tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-15:])
             # Don't leave a half-set-up worktree that a retry would silently reuse.
-            git(repo, "worktree", "remove", "--force", str(wt), check=False)
-            git(repo, "branch", "-D", f"opencode/{args.task}", check=False)
+            discard_if_new()
             die(f"setup failed (exit {r.returncode}); worktree removed so a retry starts clean:\n{tail}")
 
     orphans = abort_busy_sessions(wt, state)
@@ -583,7 +686,10 @@ def cmd_run(args):
     print("=== OPENCODE START ===")
     print(f"task     : {args.task}  ({'new' if created else 'reused'} worktree)")
     print(f"worktree : {wt}")
+    meta = load_meta(repo, args.task, wt)
     print(f"branch   : opencode/{args.task} @ {head[:10]}")
+    print(f"base     : {meta['base'][:10]} ({'snapshot of the working tree' if meta.get('kind') == 'snapshot' else 'commit'})"
+          f"  attempts so far: {attempt_count(wt, meta['base'])}")
     print(f"model    : {model}")
     print(f"timeout  : {args.timeout}s")
     print("======================", flush=True)
@@ -735,7 +841,14 @@ def cmd_run(args):
     tok = stats["tokens_in"] + stats["tokens_out"]
     print(f"tool calls {stats['tool_calls']} | tokens {tok:,} ({stats['tokens_in']:,} in, "
           f"{stats['tokens_out']:,} out) | cost ${stats['cost_usd']:.4f}")
-    print(f"review: git -C {wt} diff {head[:10]}   |   session {session_id}")
+    if changed:
+        n = attempt_count(wt, meta["base"]) + 1
+        sha = commit_task_changes(wt, f"opencode attempt {n}: {args.task} ({outcome})\n\n"
+                                      f"model {model}, session {session_id}")
+        if sha:
+            print(f"attempt {n} committed as {sha[:10]} on opencode/{args.task}")
+    me = Path(__file__).resolve()
+    print(f"review: python3 {me} diff --repo {repo} --task {args.task} [--last]   |   session {session_id}")
 
     HOME.mkdir(parents=True, exist_ok=True)
     entry = dict(ts=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), delegate="opencode",
@@ -769,7 +882,12 @@ def merge_base(repo, wt):
 
 def cmd_diff(args):
     repo, wt = task_worktree(args)
-    base = merge_base(repo, wt) or "HEAD"
+    meta = load_meta(repo, args.task, wt)
+    if args.last:
+        last_is_attempt = git(wt, "log", "-1", "--format=%s").startswith("opencode attempt ")
+        base = "HEAD~1" if last_is_attempt and not task_changes(wt) else "HEAD"
+    else:
+        base = meta["base"]
     sys.stdout.write(git(wt, "diff", base))
     untracked = [f for f, s in task_changes(wt).items() if s == "??"]
     for f in untracked:
@@ -789,10 +907,63 @@ def cmd_list(args):
     for root in roots:
         for wt in sorted(p for p in root.glob("*") if (p / ".git").exists()):
             any_found = True
-            n = len(task_changes(wt))
-            print(f"{root.name}/{wt.name}: {n} changed file(s)  {wt}")
+            repo = repo_root(wt)
+            meta = load_meta(repo, wt.name, wt)
+            ahead = git(wt, "rev-list", "--count", f"{meta['base']}..HEAD", check=False).strip() or "?"
+            applied = "  applied" if meta.get("applied_head") == git(wt, "rev-parse", "HEAD").strip() else ""
+            print(f"{root.name}/{wt.name}: base {meta['base'][:10]} ({meta.get('kind', 'head')}), "
+                  f"{ahead} attempt commit(s), {len(task_changes(wt))} uncommitted{applied}  {wt}")
     if not any_found:
         print("no task worktrees")
+    return EXIT_OK
+
+
+def cmd_apply(args):
+    """Apply the task's changes (base..HEAD) to the MAIN checkout's working tree. The only
+    command that writes to the user's checkout; it never touches the index unless --3way."""
+    repo, wt = task_worktree(args)
+    meta = load_meta(repo, args.task, wt)
+    if task_changes(wt):
+        sha = commit_task_changes(wt, f"manual edits before apply: {args.task}")
+        print(f"committed uncommitted worktree edits as {sha[:10]} before applying")
+    head = git(wt, "rev-parse", "HEAD").strip()
+    if meta.get("applied_head") == head and not args.force:
+        print(f"already applied: opencode/{args.task} @ {head[:10]} was applied at {meta.get('applied_at')}; "
+              f"pass --force to apply it again")
+        return EXIT_NOTHING
+    patch = git(wt, "diff", "--binary", meta["base"], head)
+    if not patch.strip():
+        print(f"nothing to apply: opencode/{args.task} has no changes since its base")
+        return EXIT_NOTHING
+    stat = git(wt, "diff", "--stat", meta["base"], head).rstrip()
+    HOME.mkdir(parents=True, exist_ok=True)
+    pf = HOME / f"apply-{args.task}-{os.getpid()}.patch"
+    pf.write_text(patch)
+    try:
+        mode = ["--3way"] if args.three_way else []
+        check = subprocess.run(["git", "-C", str(repo), "apply", "--check", "--binary", *mode, str(pf)],
+                               capture_output=True, text=True)
+        if check.returncode:
+            print(f"=== CONFLICTS: not applied; {repo} is unchanged ===")
+            print(check.stderr.strip())
+            print("Resolve by re-running the task on the current state (--from-working-tree on a new "
+                  "--task), or retry with --3way (stages the result in the index, marks conflicts).")
+            return EXIT_CONFLICT
+        print(f"=== {'WOULD APPLY' if args.check else 'APPLYING'} opencode/{args.task} "
+              f"({meta['base'][:10]}..{head[:10]}) to {repo} ===\n{stat}")
+        if args.check:
+            return EXIT_OK
+        r = subprocess.run(["git", "-C", str(repo), "apply", "--binary", *mode, str(pf)],
+                           capture_output=True, text=True)
+        if r.returncode:
+            print(f"=== APPLY FAILED after a clean check ===\n{r.stderr.strip()}")
+            return EXIT_CONFLICT
+    finally:
+        pf.unlink(missing_ok=True)
+    meta.update(applied_head=head, applied_at=datetime.now(timezone.utc).isoformat())
+    save_meta(repo, args.task, meta)
+    where = "working tree and index (--3way)" if args.three_way else "working tree only (nothing staged)"
+    print(f"applied to {repo}: {where}. Review with `git -C {repo} diff`.")
     return EXIT_OK
 
 
@@ -801,12 +972,24 @@ def cmd_remove(args):
     dirty = task_changes(wt)
     if dirty and not args.force:
         die(f"{wt} has {len(dirty)} uncommitted change(s); review/commit them or pass --force")
+    branch = f"opencode/{args.task}"
+    if args.delete_branch and not args.force:
+        # Check before changing anything: the branch is landed if it was applied at its current
+        # head, or merged into the main checkout's HEAD. Otherwise its attempts would be lost.
+        meta = load_meta(repo, args.task, wt)
+        head = git(wt, "rev-parse", "HEAD").strip()
+        merged = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", head, "HEAD"],
+                                capture_output=True).returncode == 0
+        if meta.get("applied_head") != head and not merged:
+            die(f"{branch} has attempts that were neither applied nor merged; `apply` it first, "
+                f"or pass --force to discard them. Nothing was removed.")
     # --force is needed for the untracked copied policy file even when nothing else changed.
     git(repo, "worktree", "remove", "--force", str(wt))
+    meta_path(repo, args.task).unlink(missing_ok=True)
     print(f"removed worktree {wt}")
     if args.delete_branch:
-        git(repo, "branch", "-D" if args.force else "-d", f"opencode/{args.task}")
-        print(f"deleted branch opencode/{args.task}")
+        git(repo, "branch", "-D", branch)
+        print(f"deleted branch {branch}")
     return EXIT_OK
 
 
@@ -875,10 +1058,22 @@ def main():
     r.add_argument("--setup", help="shell command run by this script (not OpenCode) in a NEW worktree, "
                                    "e.g. 'pnpm install --frozen-lockfile --offline'")
     r.add_argument("--unsafe-policy", action="store_true", help="delegate even if the policy check fails")
-    for name in ("diff", "remove"):
+    r.add_argument("--from-working-tree", action="store_true",
+                   help="NEW task only: start from a snapshot of the main checkout's current state "
+                        "(uncommitted and untracked, non-ignored files) instead of HEAD; land with `apply`")
+    r.add_argument("--allow-secret-files", action="store_true",
+                   help="with --from-working-tree: include untracked files whose names look like secrets")
+    for name in ("diff", "remove", "apply"):
         p = sub.add_parser(name)
         p.add_argument("--repo", required=True)
         p.add_argument("--task", required=True)
+        if name == "diff":
+            p.add_argument("--last", action="store_true", help="only the latest attempt")
+        if name == "apply":
+            p.add_argument("--check", action="store_true", help="dry run: report whether it applies cleanly")
+            p.add_argument("--3way", dest="three_way", action="store_true",
+                           help="fall back to a 3-way merge; touches the index and can leave conflict markers")
+            p.add_argument("--force", action="store_true", help="apply even if this attempt was applied before")
         if name == "remove":
             p.add_argument("--delete-branch", action="store_true")
             p.add_argument("--force", action="store_true")
@@ -898,7 +1093,7 @@ def main():
         for mid, free, ctx, tools in sorted(list_models(state), key=lambda m: (not m[1], m[0])):
             print(f"{mid:50} {'FREE' if free else '    '} ctx={ctx} tools={tools}")
         return EXIT_OK
-    return {"init": cmd_init, "run": cmd_run, "diff": cmd_diff, "list": cmd_list,
+    return {"init": cmd_init, "run": cmd_run, "diff": cmd_diff, "list": cmd_list, "apply": cmd_apply,
             "remove": cmd_remove, "report": cmd_report}[args.cmd](args)
 
 

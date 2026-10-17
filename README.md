@@ -47,6 +47,9 @@ Or from within a Claude Code session:
 /plugin install opencode-delegate@opencode-delegate-marketplace
 ```
 
+Restart Claude Code (or run `/reload-plugins`) after installing or updating, so it loads the new
+version. Updates arrive with `claude plugin update opencode-delegate@opencode-delegate-marketplace`.
+
 To work on the skill itself, add a local clone as the marketplace instead:
 `/plugin marketplace add /path/to/opencode-skill`.
 
@@ -84,7 +87,16 @@ Or ask Claude to "have OpenCode do it". To make delegation the default for one p
 line saying so to that project's `CLAUDE.md`.
 
 Script commands (`delegate.py --help`): `server start|stop|status`, `models`, `init`, `run`,
-`diff`, `list`, `remove`, `report`.
+`diff`, `apply`, `list`, `remove`, `report`.
+
+### Working on uncommitted changes
+
+`run --from-working-tree` starts a task from your current files, including uncommitted edits and
+new files git isn't ignoring, without touching your checkout. When it's done, `apply --check` then
+`apply` puts OpenCode's changes into your working tree as unstaged edits. `apply` refuses, and
+changes nothing, if they conflict with edits you made in the meantime. Each attempt is a commit on
+the local `opencode/<task>` branch. **Don't push `opencode/*` branches:** a snapshot-based one
+contains your uncommitted work.
 
 ## Safety model
 

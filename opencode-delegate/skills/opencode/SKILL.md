@@ -10,7 +10,7 @@ description: >
   for delegation (opencode.json policy), choosing the OpenCode model, and reporting past runs.
 argument-hint: "<task description>"
 metadata:
-  version: 2.0.2
+  version: 2.1.0
 ---
 
 # OpenCode delegation
@@ -31,9 +31,13 @@ and pass it along verbatim, including to any sub-agent. `delegate.py --help` lis
 ## What the script guarantees (so you don't re-implement it)
 
 - **Isolation.** `run --task <slug>` creates `~/.local/state/opencode-delegate/worktrees/<repo>/<slug>`
-  on branch `opencode/<slug>` from the main checkout's `HEAD` (or `--base`). The user's working tree
-  and uncommitted work are never touched. Re-running the same `--task` reuses that worktree, so a
-  retry builds on the previous attempt.
+  on branch `opencode/<slug>` from the main checkout's `HEAD`, `--base`, or — with
+  `--from-working-tree` — a snapshot of the user's current files (uncommitted and untracked,
+  non-ignored), taken without touching their index, files or stash. Re-running the same `--task`
+  reuses that worktree, so a retry builds on the previous attempt.
+- **Attempts are commits.** After each run the script commits OpenCode's changes on the task branch
+  as `opencode attempt N` (bot identity, git hooks disabled). Retries never lose earlier work, and
+  `diff --last` shows only the latest attempt.
 - **One server.** All runs attach to a single password-protected `opencode serve` on
   127.0.0.1:4096 (started on demand). Separate `opencode run` processes share a SQLite DB and fail
   with `database is locked` when run concurrently; through the server they don't.
@@ -108,6 +112,9 @@ and pass `--prompt-file`.
     python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py run --repo <repo> --task <slug> --prompt-file <brief.md> [--timeout 900] [--model …] [--setup "<cmd>"]
 
 - `--task`: short kebab-case slug, unique per independent task (`fix-date-parse`).
+- `--from-working-tree` (new task only): when the task depends on the user's uncommitted work.
+  It lists every untracked file it includes and refuses secret-looking names (`.env*`, `*.pem`,
+  `*.key`, `id_*`) unless `--allow-secret-files`; never pass that without asking the user.
 - `--setup`: a command **the script** (not OpenCode) runs once in a new worktree — e.g.
   `"pnpm install --frozen-lockfile --offline"` — because a fresh worktree has no `node_modules` or
   other untracked build state.
@@ -136,10 +143,19 @@ not need it; widen the allowlist only for a legitimate project check, and tell t
 
     python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py diff --repo <repo> --task <slug>
 
-Read the whole diff. Check it against the brief and the repo rules: scope creep, deleted tests,
-weakened assertions, invented data, edits to files outside the brief. Then run the project's real
-checks yourself **inside the worktree** (`cd` into the path printed as `worktree`) — OpenCode's own
-VERIFY is a claim, not evidence. Report failed, skipped and unrun checks distinctly.
+Read the whole diff (the task's base to now; add `--last` for the latest attempt only). Check it
+against the brief and the repo rules: scope creep, deleted tests, weakened assertions, invented
+data, edits to files outside the brief.
+
+**Before running any check, read every changed test, config, script, `package.json`, lockfile and
+build file in the diff.** Running checks executes that code with your permissions, outside any
+OpenCode policy (OpenCode is not sandboxed yet). If a change could run something the brief didn't
+ask for — a network call, a new dependency, a postinstall, a file write outside the repo — don't run
+the checks; report it to the user.
+
+Then run the project's real checks yourself **inside the worktree** (`cd` into the path printed as
+`worktree`) — OpenCode's own VERIFY is a claim, not evidence. Report failed, skipped and unrun
+checks distinctly.
 
 ## Step 6 — Iterate (max 3 attempts per task)
 
@@ -161,14 +177,27 @@ Concerns: <anything you would flag in review>
 Worktree: <path>  Branch: opencode/<slug>
 ```
 
-Then follow the repo's rules and the user's instructions for committing: typically commit in the
-worktree on `opencode/<slug>` (you commit, not OpenCode), then merge or cherry-pick as the user
-wants. Stage files by name. Clean up afterwards:
+With the user's go-ahead, land it in one of two ways:
+
+- **`apply` (default; required for `--from-working-tree` tasks)** puts the task's changes into the
+  user's working tree as unstaged edits, on top of whatever they have there now. Dry-run first:
+
+      python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py apply --repo <repo> --task <slug> --check
+      python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py apply --repo <repo> --task <slug>
+
+  Exit 6 means conflicts and nothing was changed: re-run the task with `--from-working-tree` on a
+  new `--task`, or ask before `--3way` (it touches the index and can leave conflict markers). The
+  user then reviews and commits as they normally would.
+- **Merge or cherry-pick `opencode/<slug>`**, only for tasks based on a commit, following the repo's
+  rules. Never merge a snapshot-based branch: its base commit contains the user's uncommitted work.
+
+Clean up afterwards:
 
     python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py remove --repo <repo> --task <slug> [--delete-branch]
 
 `remove` refuses while the worktree has uncommitted changes (`--force` discards them — only on the
-user's say-so).
+user's say-so). Task branches are local working state: never push `opencode/*` branches, since a
+snapshot-based one carries the user's uncommitted files.
 
 ## Models
 

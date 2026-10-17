@@ -1,0 +1,22 @@
+[
+  {"query": "/opencode add a --dry-run flag to the export command", "should_trigger": true},
+  {"query": "have opencode implement the retry logic in src/http/client.ts, I'll review the diff", "should_trigger": true},
+  {"query": "delegate this to opencode: rename getUserById to findUser across the repo and fix the call sites", "should_trigger": true},
+  {"query": "let the free model write the unit tests for parseDate, you just check its work", "should_trigger": true},
+  {"query": "use opencode with deepseek to fix the failing lint errors in packages/ui", "should_trigger": true},
+  {"query": "can you set this repo up so opencode can work on it safely? I want the opencode.json policy", "should_trigger": true},
+  {"query": "which free models can opencode use right now for delegation?", "should_trigger": true},
+  {"query": "show me how the last few opencode runs went — how many wrote nothing or timed out?", "should_trigger": true},
+  {"query": "run two opencode tasks in parallel: one adds input validation to the form, one updates the README", "should_trigger": true},
+  {"query": "opencode should build on my uncommitted changes in src/ — I haven't committed yet", "should_trigger": true},
+  {"query": "apply the opencode task fix-date-parse to my working tree", "should_trigger": true},
+  {"query": "this project's CLAUDE.md says coding goes through OpenCode; please add pagination to the users endpoint", "should_trigger": true},
+  {"query": "add pagination to the users endpoint", "should_trigger": false},
+  {"query": "how do I install the opencode CLI with homebrew?", "should_trigger": false},
+  {"query": "compare OpenCode and Claude Code for a team of five developers", "should_trigger": false},
+  {"query": "write an opencode.json that lets OpenCode run any command without asking", "should_trigger": false},
+  {"query": "delegate the code review of this PR to a subagent", "should_trigger": false},
+  {"query": "use codex to fix this bug instead of doing it yourself", "should_trigger": false},
+  {"query": "what is the git worktree command to create a new branch in a separate folder?", "should_trigger": false},
+  {"query": "my opencode TUI crashes on startup with a SQLite error, help me debug it", "should_trigger": false}
+]

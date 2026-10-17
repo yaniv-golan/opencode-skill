@@ -58,7 +58,11 @@ was verified against a real OpenCode server.
    copy of the caller's environment, and with the bundled `opencode-plugin/scrub-env.js` loaded via
    `OPENCODE_CONFIG_CONTENT`; a run requires that plugin's fresh heartbeat. Every command OpenCode
    runs inherits the server's environment.
-8. **Evidence, not claims.** Changed files come from `git status` before and after the run. Run-log
+8. **The user's checkout is written only by `apply`.** Snapshots use a temporary index; `apply`
+   is a separate, explicit command that touches the working tree only (the index only with
+   `--3way`) and changes nothing on conflict. Per-attempt commits use a bot identity with git hooks
+   disabled, because hooks would run repo code with the user's permissions.
+9. **Evidence, not claims.** Changed files come from `git status` before and after the run. Run-log
    entries are measured values only; never write estimated or invented numbers into
    `runs.jsonl`.
 
@@ -67,7 +71,7 @@ was verified against a real OpenCode server.
 - Python 3.9+ standard library only. No third-party packages, no shell-outs to GNU-only tools
   (`timeout`, GNU `date`, `sed -i` without a suffix). It must run on stock macOS and Linux.
 - Keep the CLI non-interactive with structured plain-text output. The documented exit codes
-  (0 ok, 1 refused, 2 wrote nothing, 3 timeout, 4 error, 5 syntax) are a contract that `SKILL.md`
+  (0 ok, 1 refused, 2 wrote nothing, 3 timeout, 4 error, 5 syntax, 6 apply conflict) are a contract that `SKILL.md`
   depends on. Change both together, or not at all.
 - Keep it one file. A second script needs a reason the first can't absorb.
 - Pass prompts and paths as argv lists, never through a shell. `--setup` is the one intentional
@@ -111,7 +115,10 @@ always re-check:
 - `--timeout` short enough to fire while the request is still queued, then confirm with
   `server status` (0 active sessions) and `git status` in the worktree a minute later
 - a server you started yourself on the test port must be refused, not reused
-- `diff`, `list`, `remove` (dirty refuses, clean succeeds), `report`
+- `diff` (vs the recorded base, `--last`), `list`, `remove` (dirty refuses, clean succeeds), `report`
+- `--from-working-tree`: main checkout's status, `.git/index` hash, staged diff and stash list
+  identical before and after; secret-named untracked file refused
+- `apply`: `--check`, clean apply, conflict (exit 6, file unchanged), already-applied
 
 Validate the skill after any `SKILL.md` change. These validators come from the `skill-creator-plus`
 plugin; run them from that skill's directory:
