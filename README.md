@@ -42,7 +42,9 @@ rewritten:
 - macOS or Linux (Windows is not supported; WSL is not tested)
 - [OpenCode](https://opencode.ai) **1.x**, tested on 1.19.3. **Not OpenCode 2:** Homebrew's plain
   `opencode` formula now installs 2.x, which changed the server API, permissions and plugins this
-  plugin relies on, and the script refuses it. Install OpenCode 1 with one of:
+  plugin relies on, and the script refuses it. Support for 2 is not planned yet: OpenCode 2.0.32
+  re-reads `opencode.json` and imports new `.opencode/plugins/` files while a session runs, so a
+  policy checked before a run no longer holds for the whole run. Install OpenCode 1 with one of:
   `brew install anomalyco/tap/opencode`, `npm install -g opencode-ai`, or
   `curl -fsSL https://opencode.ai/install | bash` (that installer only installs OpenCode 1).
   Free models need no sign-in; `delegate.py models` lists what's free right now.
@@ -169,7 +171,8 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 Claude normally runs the script for you, and can run any fix in the table above. To run it
 yourself, it lives in the plugin cache:
 `~/.claude/plugins/cache/opencode-delegate-marketplace/opencode-delegate/<version>/skills/opencode/scripts/delegate.py`.
-Subcommands (`delegate.py --help` for details): `server start|stop|status`, `models`, `init`, `run`,
+Subcommands (`delegate.py --help` for details): `server start|stop|status` (`stop` refuses while a
+run is using the server unless `--force`), `models`, `init`, `run`,
 `diff`, `apply`, `land`, `list`, `remove`, `report`, `wait`, `attach`, and for messaging `tell`,
 `answer`, `inbox`, `agents`, `pair` (`hook` is called by the plugin's Claude Code hooks).
 

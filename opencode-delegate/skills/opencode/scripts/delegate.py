@@ -68,6 +68,7 @@ PORT = int(os.environ.get("OPENCODE_DELEGATE_PORT", "4096"))
 URL = f"http://127.0.0.1:{PORT}"
 SERVER_FILE = HOME / "server.json"
 SERVER_LOCK = HOME / "server.lock"
+SERVER_USE_LOCK = HOME / "server-use.lock"
 RUN_LOG = HOME / "runs.jsonl"
 WORKTREES = HOME / "worktrees"
 LOGS = HOME / "logs"
@@ -303,11 +304,51 @@ def refuse_unsupported_server(state):
 def server_lock():
     """Serialise server start/stop across processes: two `run`s racing to restart the server
     could otherwise see a live-but-unrecorded one (recorded only once healthy) and refuse it.
-    Held only around start/stop, never during the OpenCode run itself."""
+    Held only around start/stop, never during the OpenCode run itself; a run then holds a shared
+    SERVER_USE_LOCK for its whole duration, which a restart or stop takes exclusively."""
     HOME.mkdir(parents=True, exist_ok=True)
     fd = os.open(SERVER_LOCK, os.O_WRONLY | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+_SERVER_USE_FD = None
+
+
+def server_in_use_shared():
+    """Mark this process as using the server: take a non-blocking shared lock on SERVER_USE_LOCK
+    and keep the fd open until the process exits (exit releases it, which also covers a crash or
+    SIGKILL). Called while holding server_lock(), and every exclusive holder holds server_lock()
+    too, so it cannot normally block; a BlockingIOError means the invariant was broken."""
+    global _SERVER_USE_FD
+    HOME.mkdir(parents=True, exist_ok=True)
+    fd = os.open(SERVER_USE_LOCK, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        die(f"cannot take the server-use lock {SERVER_USE_LOCK} while holding {SERVER_LOCK}")
+    _SERVER_USE_FD = fd
+    return fd
+
+
+@contextlib.contextmanager
+def server_exclusive(what):
+    """Take SERVER_USE_LOCK exclusively for a restart or stop, refusing while any run holds it
+    shared. A process that already holds the shared lock must never call this (flock would
+    convert its own lock), so the restart in cmd_run happens before the shared lock is taken."""
+    HOME.mkdir(parents=True, exist_ok=True)
+    fd = os.open(SERVER_USE_LOCK, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        die(f"cannot {what}: another delegate run is using the server; wait for it "
+            f"(`list` shows live runs) and retry")
+    try:
         yield
     finally:
         os.close(fd)
@@ -982,8 +1023,13 @@ def cmd_run(args):
                     f"isolation and has {len(busy)} active session(s); wait for them, then "
                     "`server stop` and retry")
             print("[setup] restarting the server to load the current safety plugin and config isolation")
-            server_stop()
-            state = server_start(quiet=True)
+            with server_exclusive("restart the server to load the current safety plugin and config isolation"):
+                server_stop()
+                state = server_start(quiet=True)
+        # Hold the shared use-lock until this process exits, so no restart or stop can land
+        # between the checks above and the end of the run (the busy-session check cannot see a
+        # run that has not created its session yet).
+        server_in_use_shared()
         models = {m[0]: m for m in list_models(state)}
     if model not in models:
         free = sorted(k for k, v in models.items() if v[1])
@@ -2658,6 +2704,8 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("server", help="manage the shared opencode server")
     s.add_argument("action", choices=["start", "stop", "status"])
+    s.add_argument("--force", action="store_true",
+                   help="with stop: stop even while delegate runs are using the server")
     sub.add_parser("models", help="list models offered by the server")
     i = sub.add_parser("init", help="write a default-deny opencode.json")
     i.add_argument("repo")
@@ -2762,6 +2810,14 @@ def main():
         fn = {"start": server_start, "stop": server_stop, "status": server_status}[args.action]
         if args.action == "status":
             fn()
+        elif args.action == "stop" and args.force:
+            with server_lock():
+                print("WARNING: --force: stopping the server even while delegate runs may be using it")
+                fn()
+        elif args.action == "stop":
+            with server_lock():
+                with server_exclusive("stop the server"):
+                    fn()
         else:
             with server_lock():
                 fn()

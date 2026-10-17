@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- A server restart (to load the current safety plugin) or `server stop` can no longer land
+  between another run's server check and the start of its session; runs hold a shared lock for
+  their whole duration, and restarts and stops need it exclusively.
+
+### Added
+- `server stop --force`.
+
+### Docs
+- Why OpenCode 2 is not supported yet.
+
 ## [2.1.1] - 2026-10-17
 
 ### Fixed
