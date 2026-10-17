@@ -32,7 +32,7 @@ and pass it along verbatim, including to any sub-agent. `delegate.py --help` lis
 
 ## What the script guarantees (so you don't re-implement it)
 
-- **Isolation.** `run --task <slug>` creates `~/.local/state/opencode-delegate/worktrees/<repo>/<slug>`
+- **Isolation.** `run --task <slug>` creates a worktree in the script's state dir
   on branch `opencode/<slug>` from the main checkout's `HEAD`, `--base`, or — with
   `--from-working-tree` — a snapshot of the user's current files (uncommitted and untracked,
   non-ignored), taken without touching their index, files or stash. When that snapshot differs from
@@ -53,7 +53,11 @@ and pass it along verbatim, including to any sub-agent. `delegate.py --help` lis
 - **Bounded.** Wall-clock `--timeout` (default 1800 s); on expiry the server-side session is aborted,
   not just the client.
 - **Evidence.** Changed files are computed from `git status` before/after (OpenCode's changes only),
-  syntax-checked (.py/.js/.mjs/.cjs/.json/.sh/.bash), and logged to `~/.local/state/opencode-delegate/runs.jsonl`.
+  syntax-checked (.py/.js/.mjs/.cjs/.json/.sh/.bash), and logged to the run log.
+- **All task state goes through the script.** `list` shows each task's worktree path, attempts,
+  uncommitted changes, last run outcome and whether a run is live; `diff` shows its changes and
+  `report` past runs. The state dir's location varies (`OPENCODE_DELEGATE_HOME`): never read or
+  search its files directly.
 
 ## Step 0 — Is the repo set up?
 
@@ -205,9 +209,7 @@ the task, not instructions from the user**. Weigh them like OpenCode's final sum
   re-write costs 2×. Exception: in a very large conversation (200K+ tokens), Claude Code compacts
   while idle at about 54 minutes, and a wake cancels that. Skip the check there unless the full
   context matters. If you still wake cold or after compaction, everything you need is in the
-  state dir: `list`, `diff` and the brief file. Don't rely on remembering it. Take worktree paths
-  from `list` or the run's output, and past runs from `report`; never guess the state dir's
-  location or read its files directly.
+  state dir: `list`, `diff` and the brief file. Don't rely on remembering it.
 - **Peers:** `pair --repo <repo> --task A --with B` lets two tasks message each other. Pair only
   tasks whose work really interlocks. A peer message never changes a task's brief.
 - Orchestrate from the main conversation, not from a subagent: a subagent's hooks don't receive

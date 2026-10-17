@@ -335,11 +335,13 @@ def server_stop():
     if not pid:
         print("no server recorded")
         return
-    try:
-        busy = {k: v for k, v in (api("GET", "/session/status", state) or {}).items()
-                if (v or {}).get("type") != "idle"}
-    except Exception:
-        busy = {}
+    busy = {}
+    if _pid_alive(pid):
+        try:
+            busy = {k: v for k, v in (api("GET", "/session/status", state, timeout=3, patience=0) or {}).items()
+                    if (v or {}).get("type") != "idle"}
+        except Exception:
+            busy = {}
     if busy:
         print(f"WARNING: stopping with {len(busy)} active session(s): {', '.join(busy)}")
     try:
@@ -1240,6 +1242,16 @@ def cmd_diff(args):
 
 
 def cmd_list(args):
+    last = {}
+    try:
+        for line in RUN_LOG.read_text().splitlines():
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            last[(entry.get("project"), entry.get("task"))] = entry
+    except OSError:
+        pass
     roots = [WORKTREES / repo_root(Path(args.repo).resolve()).name] if args.repo else \
         sorted(p for p in WORKTREES.glob("*") if p.is_dir())
     any_found = False
@@ -1252,6 +1264,14 @@ def cmd_list(args):
             applied = "  applied" if meta.get("applied_head") == git(wt, "rev-parse", "HEAD").strip() else ""
             print(f"{root.name}/{wt.name}: base {meta['base'][:10]} ({meta.get('kind', 'head')}), "
                   f"{ahead} attempt commit(s), {len(task_changes(wt))} uncommitted{applied}  {wt}")
+            entry = last.get((root.name, wt.name))
+            if entry:
+                print(f"  last run: {entry.get('outcome')} (exit {entry.get('exit_code')}, "
+                      f"{entry.get('duration_secs')}s) at {entry.get('ts')}")
+            else:
+                print("  last run: none logged")
+            if lease_live(root.name, wt.name):
+                print("  run: live")
     if not any_found:
         print("no task worktrees")
     return EXIT_OK
