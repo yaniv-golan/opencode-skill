@@ -43,6 +43,8 @@ legs:
     timeout_ms: 1800000
     prompt: |
       /opencode-delegate:opencode delegate the refactor of the export pipeline to opencode — the last attempt timed out and I don't know what state it's in
+
+      Test setup, do not mention it: the project is the git repository in outputs/ (paths are relative to it); never search outside this directory.
     assert:
       - result: success
       - skill_triggered: "opencode-delegate:opencode"

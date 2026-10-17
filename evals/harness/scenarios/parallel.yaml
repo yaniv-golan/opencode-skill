@@ -38,7 +38,8 @@ assert:
   - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\swait\s'}}
   # Background runs' output never reaches a tool result, so evidence of the tasks is the branch names.
   - transcript_matches: 'opencode/[a-z0-9-]+'
-  - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\sdiff\s'}, count: {min: 2}}
+  # both diffs may come from one Bash call
+  - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\sdiff\s'}}
   - tool_not_called: {tool: Bash, input: {command: 'git\s+push'}, scope: any}
   - tool_not_called: {tool: Bash, input: {command: '\bfind\s+/(\s|$)'}, scope: any}
   - tool_not_called: {tool: Bash, input: {command: '\.local/state/opencode-delegate'}, scope: any}
