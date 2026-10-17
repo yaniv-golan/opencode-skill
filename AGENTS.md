@@ -37,8 +37,9 @@ needs a bump and a `CHANGELOG.md` entry. Check consistency with skill-packager's
 These are the reason the fork exists. Each one was found broken or missing upstream, and each fix
 was verified against a real OpenCode server.
 
-1. **Isolation.** Every task runs in its own git worktree on branch `opencode/<task>`. Never point
-   OpenCode at the user's working tree. Never suggest `git checkout .` or anything that discards
+1. **Isolation.** Every task runs in its own git worktree on branch `opencode/<task>`, or, for a
+   snapshot of uncommitted work, on the private ref `refs/opencode-delegate/tasks/<task>` so
+   `git push --all` can't publish it. Never point OpenCode at the user's working tree. Never suggest `git checkout .` or anything that discards
    the user's work.
 2. **One shared server.** All runs attach (`opencode run --attach`) to a single `opencode serve`.
    Separate `opencode run` processes share a SQLite DB and fail with `database is locked`.
@@ -119,6 +120,8 @@ always re-check:
 - `--from-working-tree`: main checkout's status, `.git/index` hash, staged diff and stash list
   identical before and after; secret-named untracked file refused
 - `apply`: `--check`, clean apply, conflict (exit 6, file unchanged), already-applied
+- snapshot task: worktree detached, private ref follows each attempt, and `git push --all` to a
+  scratch bare remote does not carry the ref or the snapshot's blobs
 
 Validate the skill after any `SKILL.md` change. These validators come from the `skill-creator-plus`
 plugin; run them from that skill's directory:

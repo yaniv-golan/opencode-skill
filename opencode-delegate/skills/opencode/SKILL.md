@@ -33,7 +33,9 @@ and pass it along verbatim, including to any sub-agent. `delegate.py --help` lis
 - **Isolation.** `run --task <slug>` creates `~/.local/state/opencode-delegate/worktrees/<repo>/<slug>`
   on branch `opencode/<slug>` from the main checkout's `HEAD`, `--base`, or — with
   `--from-working-tree` — a snapshot of the user's current files (uncommitted and untracked,
-  non-ignored), taken without touching their index, files or stash. Re-running the same `--task`
+  non-ignored), taken without touching their index, files or stash. A snapshot task's commits live
+  on the private ref `refs/opencode-delegate/tasks/<slug>` (detached worktree) instead of a branch,
+  so `git push --all` never publishes the user's uncommitted files. Re-running the same `--task`
   reuses that worktree, so a retry builds on the previous attempt.
 - **Attempts are commits.** After each run the script commits OpenCode's changes on the task branch
   as `opencode attempt N` (bot identity, git hooks disabled). Retries never lose earlier work, and
@@ -174,7 +176,7 @@ Model <model>, <duration>s, attempts <n>
 Files: <path> (+a/-d) …
 Checks: <command> PASS | FAIL (<why>) | NOT RUN (<why>)
 Concerns: <anything you would flag in review>
-Worktree: <path>  Branch: opencode/<slug>
+Worktree: <path>  Commits: opencode/<slug> or refs/opencode-delegate/tasks/<slug>
 ```
 
 With the user's go-ahead, land it in one of two ways:
@@ -196,8 +198,9 @@ Clean up afterwards:
     python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py remove --repo <repo> --task <slug> [--delete-branch]
 
 `remove` refuses while the worktree has uncommitted changes (`--force` discards them — only on the
-user's say-so). Task branches are local working state: never push `opencode/*` branches, since a
-snapshot-based one carries the user's uncommitted files.
+user's say-so). Task branches and refs are local working state: don't push them, and never use
+`git push --mirror` in a repo with snapshot tasks (it pushes every ref, including
+`refs/opencode-delegate/*`). `remove --delete-branch` deletes the branch or private ref too.
 
 ## Models
 

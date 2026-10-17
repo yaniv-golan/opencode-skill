@@ -9,7 +9,9 @@ versions follow [Semantic Versioning](https://semver.org/).
 - `run --from-working-tree`: start a new task from a snapshot of the main checkout's current files
   (uncommitted edits and untracked, non-ignored files), taken through a temporary index so the
   user's index, files and stash are untouched. Lists the untracked files it includes and refuses
-  secret-looking names unless `--allow-secret-files`.
+  secret-looking names unless `--allow-secret-files`. The snapshot task's commits live on the
+  private ref `refs/opencode-delegate/tasks/<task>` (detached worktree), not a branch, so
+  `git push --all` / `--branches` never publish the user's uncommitted files.
 - `apply`: put a task's changes into the main checkout's working tree as unstaged edits, with
   `--check` (dry run), refusal on any conflict (exit 6, nothing changed), opt-in `--3way`, and
   detection of a task that was already applied.

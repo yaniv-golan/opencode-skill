@@ -95,8 +95,10 @@ Script commands (`delegate.py --help`): `server start|stop|status`, `models`, `i
 new files git isn't ignoring, without touching your checkout. When it's done, `apply --check` then
 `apply` puts OpenCode's changes into your working tree as unstaged edits. `apply` refuses, and
 changes nothing, if they conflict with edits you made in the meantime. Each attempt is a commit on
-the local `opencode/<task>` branch. **Don't push `opencode/*` branches:** a snapshot-based one
-contains your uncommitted work.
+the task. A snapshot task keeps its commits on a private ref (`refs/opencode-delegate/tasks/<task>`)
+rather than a branch, so `git push --all` won't publish your uncommitted work. `git push --mirror`
+would, so don't use it while snapshot tasks exist; remove finished ones with
+`remove --delete-branch`.
 
 ## Safety model
 

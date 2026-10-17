@@ -2,9 +2,11 @@
 """opencode delegate: run a coding task in OpenCode, isolated in a git worktree.
 
 Claude orchestrates; OpenCode edits. Every task gets its own worktree and branch
-(opencode/<task>), all runs go through ONE shared `opencode serve` (parallel
-`opencode run` processes corrupt-lock OpenCode's SQLite state), and the run is
-refused unless the worktree's opencode.json denies unlisted shell commands.
+(opencode/<task>; a snapshot-based task gets the private ref
+refs/opencode-delegate/tasks/<task> instead, so `git push --all` can't publish the user's
+uncommitted files). All runs go through ONE shared `opencode serve` (parallel `opencode run`
+processes corrupt-lock OpenCode's SQLite state), and a run is refused unless the worktree's
+opencode.json denies unlisted shell commands.
 
 Subcommands (all print plain text; exit codes below):
   server start|stop|status        manage the shared OpenCode server
@@ -392,18 +394,51 @@ def worktree_path(repo, slug):
     return WORKTREES / repo.name / slug
 
 
-def ensure_worktree(repo, slug, base):
+PRIVATE_REF_PREFIX = "refs/opencode-delegate/tasks/"
+
+
+def task_ref_name(slug, private):
+    """Where a task's commits live. Snapshot-based tasks carry the user's uncommitted files, so
+    they get a ref outside refs/heads/: `git push --all` / `--branches` never publish it."""
+    return f"{PRIVATE_REF_PREFIX}{slug}" if private else f"refs/heads/opencode/{slug}"
+
+
+def ref_label(ref):
+    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else f"private ref {ref}"
+
+
+def ref_exists(repo, ref):
+    return subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet", ref]).returncode == 0
+
+
+def sync_task_ref(wt, ref):
+    """A private-ref task's worktree is detached: point its ref at HEAD after every commit."""
+    if not ref.startswith("refs/heads/"):
+        git(wt, "update-ref", ref, "HEAD")
+
+
+def delete_task_ref(repo, ref, check=True):
+    if ref.startswith("refs/heads/"):
+        return git(repo, "branch", "-D", ref[len("refs/heads/"):], check=check)
+    return git(repo, "update-ref", "-d", ref, check=check)
+
+
+def ensure_worktree(repo, slug, base, private=False):
     wt = worktree_path(repo, slug)
-    branch = f"opencode/{slug}"
     if wt.exists():
         if not (wt / ".git").exists():
             die(f"{wt} exists but is not a git worktree; remove it or pick another --task")
         return wt, False
-    if git(repo, "branch", "--list", branch).strip():
-        die(f"branch {branch} exists without a worktree; `git -C {repo} branch -D {branch}` "
-            f"or pick another --task")
+    for ref in (task_ref_name(slug, False), task_ref_name(slug, True)):
+        if ref_exists(repo, ref):
+            die(f"{ref} exists without a worktree; delete it (`git -C {repo} update-ref -d {ref}`) "
+                f"or pick another --task")
     wt.parent.mkdir(parents=True, exist_ok=True)
-    git(repo, "worktree", "add", "-b", branch, str(wt), base or "HEAD")
+    if private:
+        git(repo, "worktree", "add", "--detach", str(wt), base or "HEAD")
+        git(repo, "update-ref", task_ref_name(slug, True), git(wt, "rev-parse", "HEAD").strip())
+    else:
+        git(repo, "worktree", "add", "-b", f"opencode/{slug}", str(wt), base or "HEAD")
     return wt, True
 
 
@@ -431,7 +466,8 @@ def load_meta(repo, slug, wt=None):
         if wt is None:
             return {}
         # Task from before metadata existed: its base is where it forked from the main checkout.
-        return {"base": merge_base(repo, wt) or git(wt, "rev-parse", "HEAD").strip(), "kind": "head"}
+        return {"base": merge_base(repo, wt) or git(wt, "rev-parse", "HEAD").strip(), "kind": "head",
+                "ref": task_ref_name(slug, False)}
 
 
 def save_meta(repo, slug, meta):
@@ -586,8 +622,9 @@ def cmd_run(args):
 
     def discard_if_new():
         if created:
+            ref = load_meta(repo, args.task).get("ref") or task_ref_name(args.task, False)
             git(repo, "worktree", "remove", "--force", str(wt), check=False)
-            git(repo, "branch", "-D", f"opencode/{args.task}", check=False)
+            delete_task_ref(repo, ref, check=False)
             meta_path(repo, args.task).unlink(missing_ok=True)
 
     def refuse(problems, where):
@@ -612,9 +649,10 @@ def cmd_run(args):
             print(f"[snapshot]   + {f}")
         if len(snap_untracked) > 30:
             print(f"[snapshot]   … {len(snap_untracked) - 30} more")
-    wt, created = ensure_worktree(repo, args.task, base_ref)
+    wt, created = ensure_worktree(repo, args.task, base_ref, private=(kind == "snapshot"))
     if created:
         save_meta(repo, args.task, {"base": git(wt, "rev-parse", "HEAD").strip(), "kind": kind,
+                                    "ref": task_ref_name(args.task, kind == "snapshot"),
                                     "created": datetime.now(timezone.utc).isoformat(),
                                     "snapshot_untracked": snap_untracked})
     policy = wt / POLICY_FILE
@@ -687,7 +725,8 @@ def cmd_run(args):
     print(f"task     : {args.task}  ({'new' if created else 'reused'} worktree)")
     print(f"worktree : {wt}")
     meta = load_meta(repo, args.task, wt)
-    print(f"branch   : opencode/{args.task} @ {head[:10]}")
+    ref = meta.get("ref") or task_ref_name(args.task, False)
+    print(f"commits  : {ref_label(ref)} @ {head[:10]}")
     print(f"base     : {meta['base'][:10]} ({'snapshot of the working tree' if meta.get('kind') == 'snapshot' else 'commit'})"
           f"  attempts so far: {attempt_count(wt, meta['base'])}")
     print(f"model    : {model}")
@@ -846,7 +885,8 @@ def cmd_run(args):
         sha = commit_task_changes(wt, f"opencode attempt {n}: {args.task} ({outcome})\n\n"
                                       f"model {model}, session {session_id}")
         if sha:
-            print(f"attempt {n} committed as {sha[:10]} on opencode/{args.task}")
+            print(f"attempt {n} committed as {sha[:10]} on {ref_label(ref)}")
+    sync_task_ref(wt, ref)  # also keeps any commit OpenCode made reachable
     me = Path(__file__).resolve()
     print(f"review: python3 {me} diff --repo {repo} --task {args.task} [--last]   |   session {session_id}")
 
@@ -923,17 +963,19 @@ def cmd_apply(args):
     command that writes to the user's checkout; it never touches the index unless --3way."""
     repo, wt = task_worktree(args)
     meta = load_meta(repo, args.task, wt)
+    ref = meta.get("ref") or task_ref_name(args.task, False)
     if task_changes(wt):
         sha = commit_task_changes(wt, f"manual edits before apply: {args.task}")
+        sync_task_ref(wt, ref)
         print(f"committed uncommitted worktree edits as {sha[:10]} before applying")
     head = git(wt, "rev-parse", "HEAD").strip()
     if meta.get("applied_head") == head and not args.force:
-        print(f"already applied: opencode/{args.task} @ {head[:10]} was applied at {meta.get('applied_at')}; "
+        print(f"already applied: {ref_label(ref)} @ {head[:10]} was applied at {meta.get('applied_at')}; "
               f"pass --force to apply it again")
         return EXIT_NOTHING
     patch = git(wt, "diff", "--binary", meta["base"], head)
     if not patch.strip():
-        print(f"nothing to apply: opencode/{args.task} has no changes since its base")
+        print(f"nothing to apply: {ref_label(ref)} has no changes since its base")
         return EXIT_NOTHING
     stat = git(wt, "diff", "--stat", meta["base"], head).rstrip()
     HOME.mkdir(parents=True, exist_ok=True)
@@ -949,7 +991,7 @@ def cmd_apply(args):
             print("Resolve by re-running the task on the current state (--from-working-tree on a new "
                   "--task), or retry with --3way (stages the result in the index, marks conflicts).")
             return EXIT_CONFLICT
-        print(f"=== {'WOULD APPLY' if args.check else 'APPLYING'} opencode/{args.task} "
+        print(f"=== {'WOULD APPLY' if args.check else 'APPLYING'} {ref_label(ref)} "
               f"({meta['base'][:10]}..{head[:10]}) to {repo} ===\n{stat}")
         if args.check:
             return EXIT_OK
@@ -972,11 +1014,12 @@ def cmd_remove(args):
     dirty = task_changes(wt)
     if dirty and not args.force:
         die(f"{wt} has {len(dirty)} uncommitted change(s); review/commit them or pass --force")
-    branch = f"opencode/{args.task}"
+    meta = load_meta(repo, args.task, wt)
+    ref = meta.get("ref") or task_ref_name(args.task, False)
+    branch = ref_label(ref)
     if args.delete_branch and not args.force:
         # Check before changing anything: the branch is landed if it was applied at its current
         # head, or merged into the main checkout's HEAD. Otherwise its attempts would be lost.
-        meta = load_meta(repo, args.task, wt)
         head = git(wt, "rev-parse", "HEAD").strip()
         merged = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", head, "HEAD"],
                                 capture_output=True).returncode == 0
@@ -988,8 +1031,10 @@ def cmd_remove(args):
     meta_path(repo, args.task).unlink(missing_ok=True)
     print(f"removed worktree {wt}")
     if args.delete_branch:
-        git(repo, "branch", "-D", branch)
-        print(f"deleted branch {branch}")
+        delete_task_ref(repo, ref)
+        print(f"deleted {branch}")
+    elif not ref.startswith("refs/heads/"):
+        print(f"kept {branch} (its commits stay reachable; delete with --delete-branch)")
     return EXIT_OK
 
 
@@ -1075,7 +1120,8 @@ def main():
                            help="fall back to a 3-way merge; touches the index and can leave conflict markers")
             p.add_argument("--force", action="store_true", help="apply even if this attempt was applied before")
         if name == "remove":
-            p.add_argument("--delete-branch", action="store_true")
+            p.add_argument("--delete-branch", action="store_true",
+                           help="also delete the task's branch (or private ref)")
             p.add_argument("--force", action="store_true")
     l = sub.add_parser("list")
     l.add_argument("--repo")
