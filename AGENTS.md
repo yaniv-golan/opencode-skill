@@ -130,6 +130,12 @@ always re-check:
   scratch bare remote does not carry the ref or the snapshot's blobs
 - `--check` (a passing and a failing check → exit 7, FAIL output shown) and `--only` (an
   out-of-scope change → exit 7); both reused by the next attempt of the same task
+- `--add-only` extends the saved `--only` list (`[scope]` shows it); `OPENCODE_DELEGATE_PASS_ENV`
+  set on a run reaches its `--check`
+- policy integrity: a changed untracked (or gitignored) worktree copy is replaced; a differing
+  committed copy is refused, and runs with `--allow-worktree-policy`; OpenCode editing the policy
+  → exit 7 `POLICY MODIFIED`, even when that is its only change
+- snapshot task with an untracked policy: the snapshot leaves it out; a later main-checkout edit is picked up
 - `land`: refuses `--commit` when a task file has the user's own changes (file untouched),
   commits only the task's files, leaves other staged work staged, removes the task
 - `run --detach` returns once live; `wait` reports the result once, a question, a run that ended

@@ -162,7 +162,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | "repo pins Node … but the server's shell has …" | `delegate.py server stop`, then start a run with `OPENCODE_DELEGATE_PATH_PREPEND=<pinned node bin dir>` set |
 | `database is locked` | You ran `opencode run` directly in parallel; go through `delegate.py`, which shares one server |
 | `apply` exits 6 | Your files changed where OpenCode's did. Nothing was touched; re-run the task from your current state |
-| `run` exits 7 | A `--check` failed, or OpenCode changed a file outside `--only`; the run output lists which |
+| `run` exits 7 | A `--check` failed, OpenCode changed a file outside `--only`, or it edited `opencode.json`; the run output lists which |
 | "found loadable OpenCode extensions" | The repo (or `~/.opencode`) ships OpenCode plugins/tools/agents; review them, then pass `--allow-opencode-dir` |
 | "MCP server … is enabled" | Disable it in `opencode.json`, or pass `--allow-mcp <name>` if you trust it |
 

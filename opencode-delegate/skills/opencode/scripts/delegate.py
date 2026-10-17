@@ -769,7 +769,9 @@ def snapshot_working_tree(repo, allow_secret_files):
     """Commit the main checkout's current state (tracked changes + untracked, non-ignored files)
     WITHOUT touching its index, working tree or stash: a temporary index file is used.
     Returns (commit, untracked_files, untracked_bytes); commit is HEAD when nothing differs."""
-    untracked = [f for f in git(repo, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if f]
+    # The policy is the script's own copy, not task content (see cmd_run), so it is left out.
+    others = [f for f in git(repo, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if f]
+    untracked = [f for f in others if f != POLICY_FILE]
     secret = [f for f in untracked if SECRET_NAME_RE.match(Path(f).name)]
     if secret and not allow_secret_files:
         die("refusing to snapshot: untracked files that look like secrets would be copied into "
@@ -781,7 +783,8 @@ def snapshot_working_tree(repo, allow_secret_files):
     env = {"GIT_INDEX_FILE": str(idx)}
     try:
         git_env(repo, env, "read-tree", "HEAD")
-        git_env(repo, env, "add", "-A")
+        exclude = [f":(exclude){POLICY_FILE}"] if POLICY_FILE in others else []
+        git_env(repo, env, "add", "-A", "--", ".", *exclude)
         tree = git_env(repo, env, "write-tree").strip()
     finally:
         idx.unlink(missing_ok=True)
@@ -934,6 +937,9 @@ def run_detached(args):
             print(f"started {repo.name}/{args.task} (pid {child.pid}, run {run_id}); "
                   f"log {out_dir / (run_id + '.log')}; follow with: "
                   f"wait --repo {repo} --task {args.task}")
+            # Hand the human a ready-to-paste command; the line above is for the orchestrator.
+            print(f"for the user (paste into a terminal to watch or steer the task): "
+                  f"python3 {Path(__file__).resolve()} attach --repo {repo} --task {args.task}")
             return EXIT_OK
         time.sleep(0.5)
     try:
@@ -1014,6 +1020,13 @@ def cmd_run(args):
     # so a server another process just started (or is mid-restart) is seen, not refused.
     with server_lock():
         state = server_start(quiet=True)
+        # A restart this script makes (plugin/isolation mismatch), --setup and --check would
+        # otherwise silently drop a pinned Node: reuse the running server's prepend so they use
+        # the same toolchain. An explicitly set variable (even empty) always wins.
+        if "OPENCODE_DELEGATE_PATH_PREPEND" not in os.environ and state.get("path_prepend"):
+            os.environ["OPENCODE_DELEGATE_PATH_PREPEND"] = state["path_prepend"]
+            print(f"[setup] using the running server's PATH prepend {state['path_prepend']} "
+                  "(set OPENCODE_DELEGATE_PATH_PREPEND to override)")
         want = plugins_sha256()
         if state.get("scrub_plugin") != want or state.get("isolation") != 2:
             busy = [k for k, v in (api("GET", "/session/status", state) or {}).items()
@@ -1082,15 +1095,44 @@ def cmd_run(args):
     if args.only:
         meta["only"] = args.only
         save_meta(repo, args.task, meta)
+    if args.add_only:
+        # --only (if also given) replaces first, then --add-only appends; keep order, skip dups.
+        saved_only = list(meta.get("only", []))
+        for p in args.add_only:
+            if p not in saved_only:
+                saved_only.append(p)
+        meta["only"] = saved_only
+        save_meta(repo, args.task, meta)
     scope = meta.get("only", [])
+    if scope:
+        tail = " (saved from an earlier attempt)" if not (args.only or args.add_only) else ""
+        print(f"[scope] only: {', '.join(scope)}{tail}")
+    if checks:
+        tail = " (saved from an earlier attempt)" if not args.check else ""
+        print(f"[checks] {'; '.join(checks)}{tail}")
     policy = wt / POLICY_FILE
     copied_policy = False
+    tracked = bool(git(wt, "ls-files", "--", POLICY_FILE).strip())
     if not policy.exists() and (repo / POLICY_FILE).exists():
         shutil.copy2(repo / POLICY_FILE, policy)  # uncommitted in the main checkout
         copied_policy = True
     elif (repo / POLICY_FILE).exists() and policy.read_bytes() != (repo / POLICY_FILE).read_bytes():
-        print(f"[WARN] {POLICY_FILE} in the worktree differs from {repo / POLICY_FILE}; "
-              f"the worktree's copy is the one enforced")
+        if not tracked:
+            # An untracked copy is the script's own; the main checkout's file is authoritative.
+            shutil.copy2(repo / POLICY_FILE, policy)
+            copied_policy = True
+            print(f"[WARN] {POLICY_FILE} in the worktree differed from {repo / POLICY_FILE}; "
+                  f"replaced it with the main checkout's copy")
+        elif not args.allow_worktree_policy:
+            # A committed worktree copy would be enforced over the main checkout's; only proceed
+            # on an explicit decision.
+            discard_if_new()
+            die(f"{POLICY_FILE} committed in the worktree differs from {repo / POLICY_FILE}; "
+                f"the worktree's copy would be enforced. Compare them, then pass "
+                "--allow-worktree-policy to enforce the worktree's copy")
+        else:
+            print(f"[WARN] {POLICY_FILE} in the worktree differs from {repo / POLICY_FILE}; "
+                  f"the worktree's copy is the one enforced")
     problems = check_policy(policy, args.allow_mcp)
     if problems and not args.unsafe_policy:
         refuse(problems, wt)
@@ -1101,9 +1143,13 @@ def cmd_run(args):
     if nvmrc.exists():
         want = "v" + nvmrc.read_text().strip().lstrip("v")
         if state.get("node") != want:
+            # Name the nvm bin dir when the pinned Node lives under nvm, so the fix is copy-pasteable.
+            nvm_root = os.environ.get("NVM_DIR") or os.path.expanduser("~/.nvm")
+            candidate = Path(nvm_root) / "versions" / "node" / want / "bin"
+            target = (f"{candidate}" if candidate.is_dir() else f"<node {want} bin dir>")
             print(f"[WARN] repo pins Node {want} (.nvmrc) but the server's shell has "
                   f"{state.get('node')}; OpenCode's checks will run on the wrong Node. Restart with "
-                  f"OPENCODE_DELEGATE_PATH_PREPEND=<node {want} bin dir> (server stop, then run again)")
+                  f"OPENCODE_DELEGATE_PATH_PREPEND={target} (server stop, then run again)")
 
     if args.setup and created:
         print(f"[setup] {args.setup}")
@@ -1173,6 +1219,7 @@ def cmd_run(args):
 
     # Check what the server will actually enforce (merged global + project,
     # after the cache reset), not just the file.
+    effective = {}
     try:
         effective = api("GET", f"/config?directory={urllib.request.quote(str(wt))}", state) or {}
         problems = check_config(effective, args.allow_mcp)
@@ -1212,6 +1259,7 @@ def cmd_run(args):
             os.close(fd)
 
     before = porcelain(wt)
+    policy_sha_before = hashlib.sha256(policy.read_bytes()).hexdigest() if policy.exists() else None
     head = git(wt, "rev-parse", "HEAD").strip()
     print("=== OPENCODE START ===")
     print(f"task     : {args.task}  ({'new' if created else 'reused'} worktree)")
@@ -1266,12 +1314,25 @@ def cmd_run(args):
             brief = "\n".join(parts) + "\n" + prompt
             delivered.extend(m["id"] for m in pending)
             print(f"[messages] {len(pending)} queued message(s) added to the brief")
+        # Tell OpenCode which shell commands the policy allows, from the effective config
+        # fetched above; guard non-dict values (permission may be missing or a string).
+        _perm = effective.get("permission") if isinstance(effective, dict) else None
+        _bash = _perm.get("bash") if isinstance(_perm, dict) else None
+        allowed_shell = [k for k, v in _bash.items() if v == "allow"] if isinstance(_bash, dict) else []
         rules = ["", "", "RULES FOR THIS RUN (added by the delegate script):",
                  "- Follow the repository's AGENTS.md if it has one.",
                  "- Run each shell command on its own: no `&&`, `;`, `|` or subshells; "
                  "chained commands are denied.",
                  "- Do not commit, push or create branches.",
                  "- Make the edits now; do not only describe them."]
+        if allowed_shell:
+            rules.insert(5, "- Shell commands the policy allows (anything else is denied and wastes "
+                            "a turn): " + ", ".join(f"`{k}`" for k in allowed_shell) + ". Read, search "
+                            "and list files with your read, grep, glob and list tools, not shell cat, "
+                            "grep, rg, find or python.")
+        else:
+            rules.insert(5, "- The policy denies every shell command. Read, search and list files "
+                            "with your read, grep, glob and list tools.")
         if scope:
             rules.append("- Change only these paths: " + ", ".join(scope) + ".")
         if checks:
@@ -1437,6 +1498,8 @@ def cmd_run(args):
             print(f"[abort] stopped server-side session(s): {', '.join(aborted)}")
 
         after = porcelain(wt)
+        policy_sha_after = hashlib.sha256(policy.read_bytes()).hexdigest() if policy.exists() else None
+        policy_modified = policy_sha_after != policy_sha_before
         changed = sorted(f for f, s in after.items() if before.get(f) != s
                          and not (copied_policy and f == POLICY_FILE))
         head_after = git(wt, "rev-parse", "HEAD").strip()
@@ -1485,7 +1548,10 @@ def cmd_run(args):
             outcome, code = "syntax_errors", EXIT_SYNTAX
         else:
             outcome, code = "ok", EXIT_OK
-        if outcome == "ok" and (checks_failed or out_of_scope or created_ext):
+        if outcome == "ok" and (checks_failed or out_of_scope or created_ext or policy_modified):
+            outcome, code = "gate_failed", EXIT_GATE
+        # A policy edit must fail the gate even when it is the run's only change.
+        if policy_modified and outcome == "wrote_nothing":
             outcome, code = "gate_failed", EXIT_GATE
         print(f"=== OPENCODE {outcome.upper()} (opencode exit {rc}, {duration}s) ===")
         if commits:
@@ -1502,6 +1568,10 @@ def cmd_run(args):
             print(f"=== OUT OF SCOPE ({len(out_of_scope)}) ===")
             for f in out_of_scope:
                 print(f"  {f}")
+        if policy_modified:
+            print("=== POLICY MODIFIED ===")
+            print(f"OpenCode changed {POLICY_FILE} during this run; it is not enforced until you "
+                  "review it (an untracked copy is restored on the next run, a committed one is refused)")
         if created_ext:
             print("=== OPENCODE EXTENSIONS CREATED BY THIS RUN (the next run would load them) ===")
             for p in created_ext:
@@ -1553,7 +1623,7 @@ def cmd_run(args):
                      prompt_words=len(prompt.split()), files_changed=len(changed),
                      syntax_errors=len(syntax_errors), denied=len(stats["denied"]),
                      checks_passed=checks_passed, checks_failed=checks_failed,
-                     out_of_scope=len(out_of_scope),
+                     out_of_scope=len(out_of_scope), policy_modified=policy_modified,
                      tool_errors=stats["tool_errors"], tool_calls=stats["tool_calls"],
                      tokens_in=stats["tokens_in"], tokens_out=stats["tokens_out"],
                      tokens_reasoning=stats["tokens_reasoning"],
@@ -2729,9 +2799,12 @@ def main():
                    help="allow this enabled MCP server despite the policy check (repeatable)")
     r.add_argument("--check", action="append", metavar="CMD",
                    help="shell command this script runs in the worktree after OpenCode finishes "
-                        "(repeatable); a failure fails the run")
+                        "(repeatable); a failure fails the run; replaces the task's saved checks")
     r.add_argument("--only", action="append", metavar="PATH",
-                   help="path the task may change (repeatable); edits outside it fail the run")
+                   help="path the task may change (repeatable); replaces the task's saved list; "
+                        "edits outside it fail the run")
+    r.add_argument("--add-only", action="append", metavar="PATH",
+                   help="add a path to the task's saved --only list (repeatable)")
     r.add_argument("--from-working-tree", action="store_true",
                    help="NEW task only: start from a snapshot of the main checkout's current state "
                         "(uncommitted and untracked, non-ignored files) instead of HEAD; land with `apply`")
@@ -2741,6 +2814,9 @@ def main():
                    help="run even though the worktree or ~/.opencode holds loadable OpenCode "
                         "extensions (plugins, tools, agents, commands, modes, skills); remembered "
                         "for this task until they change")
+    r.add_argument("--allow-worktree-policy", action="store_true",
+                   help="enforce a committed opencode.json in the worktree that differs from the "
+                        "main checkout's")
     r.add_argument("--detach", action="store_true",
                    help="start the run in the background and return once it is live")
     r.add_argument("--_detached", action="store_true", help=argparse.SUPPRESS)

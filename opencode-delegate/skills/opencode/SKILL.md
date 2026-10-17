@@ -10,7 +10,7 @@ description: >
   for delegation (opencode.json policy), choosing the OpenCode model, and reporting past runs.
 argument-hint: "<task description>"
 metadata:
-  version: 2.1.2
+  version: 2.2.0
 ---
 
 # OpenCode delegation
@@ -64,7 +64,8 @@ Add `--allow` only for the exact project commands OpenCode needs to self-verify 
 unit tests). Prefer exact commands to wildcards; never allow `node *`, `python *`, `npx *`, `sh`,
 `curl`, `rm` or `git commit/push` — any of those hands OpenCode an unrestricted shell. Show the user
 the file, and ask before committing it (repo rules on commits apply). Until it is committed, the
-script copies the uncommitted file into each new worktree.
+script copies the uncommitted file into each worktree: `git status` there shows `?? opencode.json`
+(attempt commits leave it out), and the main checkout's copy is the one enforced.
 
 ## Step 1 — Decide what to delegate
 
@@ -98,7 +99,8 @@ VERIFY: run `<an allowlisted check command>` and confirm it passes;
 ```
 
 `run` appends the standing rules to every brief: follow AGENTS.md, one shell command at a time,
-don't commit, make the edits now, plus the `--only` paths and `--check` commands. Don't repeat them.
+don't commit, make the edits now, the shell commands the policy allows, plus the `--only` paths and
+`--check` commands. Don't repeat them.
 
 Keep briefs dense: exact names, signatures, exit codes and safety rules; point at the file for
 style ("follow `cmd_run`") instead of restating it. One objective per brief. Name the files. Give a VERIFY step OpenCode can actually run under the
@@ -121,9 +123,12 @@ and pass `--prompt-file`.
   `"pnpm install --frozen-lockfile --offline"` — because a fresh worktree has no `node_modules` or
   other untracked build state.
 - `--check "<cmd>"` (repeatable): the script runs it in the worktree after OpenCode finishes,
-  with OpenCode's minimal environment, and reports PASS/FAIL. `--only <path>` (repeatable; a
-  directory or glob also works): any change outside these paths fails the run. Both are saved on
-  the task and reused by later attempts. Prefer them to rerunning checks or scanning the diff by hand.
+  with OpenCode's minimal environment (add variables with `OPENCODE_DELEGATE_PASS_ENV=NAME,…` on
+  the `run`), and reports PASS/FAIL. `--only <path>` (repeatable; a directory or glob also works):
+  any change outside these paths fails the run. Both are saved on the task and reused by later
+  attempts when omitted; passing either again **replaces** the saved list, and `--add-only <path>`
+  extends it. `run` prints the scope in force as `[scope]` and `[checks]`. Prefer them to
+  rerunning checks or scanning the diff by hand.
 - **Launch with `--detach`, then wait in the foreground with `wait`.** `--detach` returns as
   soon as the run is live. `wait` returns early with a task's question or message, or with the
   finished run's result, and exits 8 if `--max` passes first: call it again. Never use the Bash
@@ -131,10 +136,9 @@ and pass `--prompt-file`.
   environment, and a one-shot session ends before they report. Free models queue: a task usually
   takes 2–5 minutes, sometimes 15–20. For parallel tasks, make one `--detach` call per task, then
   a single `wait`.
-- **Tell the user how to watch it.** After launching, give them this line to paste into their own
-  terminal (it needs a real one): `python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py attach --repo
-  <repo> --task <slug>`. Say that typing into it steers the task, and that `--fork` opens a copy
-  instead.
+- **Tell the user how to watch it, every launch.** `run --detach` prints a `for the user` line with
+  the `attach` command; pass it on to them verbatim, to paste into their own terminal (it needs a
+  real one). Say that typing into it steers the task, and that `--fork` opens a copy instead.
 
 ## Step 4 — Read the result
 
@@ -147,7 +151,7 @@ The script streams `[tool] target` lines with elapsed seconds, then a summary. E
 | 3 | `TIMEOUT` — session aborted | `diff` to see partial work; split the task or raise `--timeout` |
 | 4 | `ERROR` — model/server error | Retry once; if repeated, try another model (`models`) |
 | 5 | `SYNTAX_ERRORS` | Re-delegate on the same `--task` with the error text, or fix if trivial |
-| 7 | `GATE_FAILED`: a `--check` failed or a file outside `--only` changed | Re-delegate with the FAIL output or the out-of-scope list (`tell`, then `run`) |
+| 7 | `GATE_FAILED`: a `--check` failed, a file outside `--only` changed, or OpenCode edited `opencode.json` | Re-delegate with the FAIL output or the out-of-scope list (`tell`, then `run`) |
 | 1 | Refused before delegating | Read the message (policy, model, slug, setup). Fix the cause; **never pass `--unsafe-policy`** to get past a policy refusal unless the user explicitly tells you to |
 
 Red flags in the stream: `[DENIED]` (OpenCode tried a command the policy blocks — usually it should
@@ -169,7 +173,8 @@ ask for — a network call, a new dependency, a postinstall, a file write outsid
 the checks; report it to the user.
 
 Then run the project's real checks yourself **inside the worktree** (`cd` into the path printed as
-`worktree`) — OpenCode's own VERIFY is a claim, not evidence. Report failed, skipped and unrun
+`worktree :` in the run log; `list --repo <repo>` ends each task's first line with it) — OpenCode's
+own VERIFY is a claim, not evidence. Report failed, skipped and unrun
 checks distinctly.
 
 ## Step 6 — Iterate (max 3 attempts per task)
@@ -217,7 +222,8 @@ Worktree: <path>  Commits: opencode/<slug> or refs/opencode-delegate/tasks/<slug
 
 With the user's go-ahead, land it with `land` (apply, then remove the task), with `apply` (the
 changes become unstaged edits in their checkout; required for `--from-working-tree` tasks), or by
-merging `opencode/<slug>` (commit-based tasks only). Dry-run first:
+merging `opencode/<slug>` into any branch with plain `git merge` (commit-based tasks only; then
+`remove` the task). Dry-run first:
 
     python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py apply --repo <repo> --task <slug> --check
     python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py land --repo <repo> --task <slug> [--commit -m "<msg>"]

@@ -5,7 +5,8 @@ Read when a task's isolation, attempts, server or evidence matter.
 - **Isolation.** `run --task <slug>` creates a worktree in the script's state dir
   on branch `opencode/<slug>` from the main checkout's `HEAD`, `--base`, or — with
   `--from-working-tree` — a snapshot of the user's current files (uncommitted and untracked,
-  non-ignored), taken without touching their index, files or stash. When that snapshot differs from
+  non-ignored, except an untracked `opencode.json`, which is copied in separately), taken without
+  touching their index, files or stash. When that snapshot differs from
   `HEAD`, the task's commits live on the private ref `refs/opencode-delegate/tasks/<slug>` (detached
   worktree) instead of a branch, so `git push --all` never publishes the user's uncommitted files; a
   clean tree gives an ordinary `opencode/<slug>` branch. Re-running the same `--task`

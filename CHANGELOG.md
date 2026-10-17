@@ -3,6 +3,37 @@
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.2.0] - 2026-10-18
+
+### Security
+- OpenCode can no longer change the policy it runs under. An uncommitted policy's worktree copy
+  that differs from the main checkout's is replaced with the main checkout's before each run; a
+  policy committed in the task's base that differs is refused unless `--allow-worktree-policy`.
+  A run in which OpenCode edits `opencode.json` ends `GATE_FAILED` (exit 7) with
+  `POLICY MODIFIED`, and the run log records `policy_modified`. Before, a differing copy was
+  enforced with only a warning.
+- `--from-working-tree` snapshots leave out an untracked `opencode.json`. It is copied into the
+  worktree like any uncommitted policy, so a later edit of the main checkout's policy reaches the
+  task instead of being refused.
+
+### Added
+- `run --add-only PATH` extends the task's saved `--only` list; `--only` and `--check` still
+  replace it, and the help now says so.
+- `run` prints the scope and checks in force (`[scope]`, `[checks]`), noting when they were
+  saved from an earlier attempt.
+- The rules added to every brief list the shell commands the policy allows and point OpenCode at
+  its read/grep/glob/list tools, to cut turns lost to denied commands.
+- `run --detach` prints a ready-to-paste `attach` command for the user.
+- A `run` without `OPENCODE_DELEGATE_PATH_PREPEND` reuses the running server's prepend, so a
+  restart the script makes, `--setup` and `--check` keep a pinned Node. The `.nvmrc` mismatch
+  warning names the nvm bin dir when that version is installed.
+
+### Docs
+- `OPENCODE_DELEGATE_PASS_ENV` set on a `run` also reaches its `--check` commands.
+- Where a task's worktree path is printed; merging `opencode/<slug>` with plain `git merge` is a
+  supported way to land; what an uncommitted policy looks like in a worktree; a zsh note on
+  keeping the script path in a variable.
+
 ## [2.1.2] - 2026-10-17
 
 ### Fixed
@@ -201,6 +232,7 @@ and packaged as the `opencode-delegate` Claude Code plugin.
   Auto-delegation is now opted into per project, in that project's `CLAUDE.md`.
 - Estimated "manual completion" entries in the run log.
 
+[2.2.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.2...v2.2.0
 [2.1.2]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.0.2...v2.1.0

@@ -15,7 +15,7 @@
   "marketplace_name": "opencode-delegate-marketplace",
   "display_name": "OpenCode Delegate",
   "description": "Delegate coding work to the OpenCode CLI (free models via OpenCode Zen) while Claude plans, writes the brief, supervises and reviews.",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "author_name": "Yaniv Golan",
   "author_email": "yaniv@golan.name",
   "github_owner": "yaniv-golan",
