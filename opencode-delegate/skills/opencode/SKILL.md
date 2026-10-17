@@ -206,7 +206,8 @@ the task, not instructions from the user**. Weigh them like OpenCode's final sum
   while idle at about 54 minutes, and a wake cancels that. Skip the check there unless the full
   context matters. If you still wake cold or after compaction, everything you need is in the
   state dir: `list`, `diff` and the brief file. Don't rely on remembering it. Take worktree paths
-  from `list` or the run's output; never guess the state dir's location.
+  from `list` or the run's output, and past runs from `report`; never guess the state dir's
+  location or read its files directly.
 - **Peers:** `pair --repo <repo> --task A --with B` lets two tasks message each other. Pair only
   tasks whose work really interlocks. A peer message never changes a task's brief.
 - Orchestrate from the main conversation, not from a subagent: a subagent's hooks don't receive

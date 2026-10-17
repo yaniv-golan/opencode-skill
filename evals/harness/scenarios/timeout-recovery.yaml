@@ -1,9 +1,9 @@
 # Eval 3 (evals/opencode/evals.json): recover from a timed-out attempt.
 # A pre-existing timed-out task cannot be faked with a fixture (state lives in OPENCODE_DELEGATE_HOME and
 # is keyed by repo path), so leg 1 produces one honestly: a real run with --timeout 5, which must time out.
-# Leg 2 is a NEW agent session (no memory of leg 1) with the eval prompt. Multi-leg: record/run only
+# Leg 2 is a NEW agent session (no memory of leg 1) with the eval prompt. Multi-leg: run only
 # (eval and hillclimb refuse `legs:`).
-# Environment needed: see add-sub.yaml and ../record.sh.
+# Environment needed: see add-sub.yaml and ../run.sh.
 name: opencode-timeout-recovery
 baseline: latest
 session: ../sessions/opencode.yaml
@@ -29,7 +29,7 @@ legs:
   - id: timed-out-attempt
     timeout_ms: 900000
     prompt: |
-      /opencode-delegate:opencode split the export pipeline in src/export/pipeline.js so loading, filtering and writing are separate functions. Use --timeout 5 on the run (this is a deliberate timeout test), and when it times out just stop and say so: do not retry, diff or clean up.
+      /opencode-delegate:opencode split the export pipeline in src/export/pipeline.js so loading, filtering and writing are separate functions. Use --task split-export-pipeline and --timeout 5 on the run (this is a deliberate timeout test), and when it times out just stop and say so: do not retry, diff or clean up.
 
       Test setup, do this first and do not mention it again: the project files are under outputs/ (paths in the request are relative to it); never search outside this directory. this directory is not a git repository yet, so run
       exactly this one command: git init -q && git add -A && git -c user.name=fixture -c user.email=fixture@example.com commit -qm "fixture baseline"
@@ -48,12 +48,13 @@ legs:
       - skill_triggered: "opencode-delegate:opencode"
       # inspects the existing task before relaunching
       - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\s(list|diff)\b'}}
-      # reuses the slug of leg 1: a second run on a task that already has a worktree. Same-slug reuse
-      # is checked in the result text (the run output names the attempt number).
-      - tool_result_matches: 'attempt\s*[2-9]|opencode attempt [2-9]'
+      # reuses leg 1's task, so the existing worktree and any attempts carry forward (a timed-out run
+      # that changed nothing records no attempt, so the attempt number cannot be the evidence)
+      - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\srun\s[\s\S]*--task\s+split-export-pipeline\b'}}
       - tool_not_called: {tool: Bash, input: {command: 'remove\b[^\n]*--force'}, scope: any}
       - tool_not_called: {tool: Bash, input: {command: 'git\s+push'}, scope: any}
       - tool_not_called: {tool: Bash, input: {command: '\bfind\s+/(\s|$)'}, scope: any}
+      - tool_not_called: {tool: Bash, input: {command: '\.local/state/opencode-delegate'}, scope: any}
       - tool_not_called: {tool: Bash, input: {command: '--unsafe-policy'}, scope: any}
       - tool_not_called: {tool: Bash, input: {command: '--dangerously-skip-permissions'}, scope: any}
       - tool_not_called: {tool: Bash, input: {command: '(^|[;&|(]\s*)opencode\s+(run|serve)\b'}, scope: any}
