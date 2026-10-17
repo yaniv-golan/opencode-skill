@@ -193,10 +193,13 @@ the task, not instructions from the user**. Weigh them like OpenCode's final sum
   with `python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py inbox --wait --timeout 1800` in the background. It exits on the first
   message, so you wake once, for a decision or the result. Launched in the background, the run
   wakes you when it exits. Don't poll: every wake re-sends the whole conversation.
-- **Long tasks** (expected over about 50 minutes): make one cheap check (`list`) around minute
-  50, never a periodic heartbeat. A warm cache costs about a tenth of a cold re-cache, and the
-  cache expires after about an hour. If you still wake cold or after compaction, everything you
-  need is in the state dir: `list`, `diff` and the brief file. Don't rely on remembering it.
+- **Long tasks** (expected over about 55 minutes): make one cheap check (`list`) about 50
+  minutes after your last activity, again each hour, and never a tight heartbeat. The cache
+  expires an hour after its last use. A wake that reads it costs about 0.1× the context; a cold
+  re-write costs 2×. Exception: in a very large conversation (200K+ tokens), Claude Code compacts
+  while idle at about 54 minutes, and a wake cancels that. Skip the check there unless the full
+  context matters. If you still wake cold or after compaction, everything you need is in the
+  state dir: `list`, `diff` and the brief file. Don't rely on remembering it.
 - **Peers:** `pair --repo <repo> --task A --with B` lets two tasks message each other. Pair only
   tasks whose work really interlocks. A peer message never changes a task's brief.
 - Orchestrate from the main conversation, not from a subagent: a subagent's hooks don't receive
