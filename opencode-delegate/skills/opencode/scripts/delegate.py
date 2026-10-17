@@ -128,7 +128,8 @@ def plugins_sha256():
 
 
 def heartbeat_file(directory):
-    return HEARTBEATS / hashlib.sha256(str(directory).encode()).hexdigest()[:32]
+    # Plugins hash the directory OpenCode reports, which is the resolved path.
+    return HEARTBEATS / hashlib.sha256(os.path.realpath(str(directory)).encode()).hexdigest()[:32]
 
 
 def node_version(env):
@@ -273,7 +274,8 @@ def server_start(quiet=False):
              "scrub_plugin": plugins_sha256(),
              "path_prepend": os.environ.get("OPENCODE_DELEGATE_PATH_PREPEND", ""),
              "started": datetime.now(timezone.utc).isoformat()}
-    for _ in range(60):
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             die(f"opencode serve exited with {proc.returncode}; see {HOME / 'server.log'}")
         if server_healthy(state):
@@ -290,7 +292,7 @@ def server_start(quiet=False):
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    die(f"opencode serve did not become healthy in 30s (stopped it); see {HOME / 'server.log'}")
+    die(f"opencode serve did not become healthy in 90s (stopped it); see {HOME / 'server.log'}")
 
 
 def _pid_alive(pid):
@@ -1346,7 +1348,8 @@ def orchestrator_envelope(token, m):
 
 
 def plugin_token_file(directory):
-    return PLUGIN_TOKENS / hashlib.sha256(str(directory).encode()).hexdigest()[:32]
+    # Plugins hash the directory OpenCode reports, which is the resolved path.
+    return PLUGIN_TOKENS / hashlib.sha256(os.path.realpath(str(directory)).encode()).hexdigest()[:32]
 
 
 # A task may send the orchestrator at most this many messages plus questions per run.
