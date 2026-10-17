@@ -12,7 +12,8 @@ Subcommands (all print plain text; exit codes below):
   server start|stop|status        manage the shared OpenCode server
   models                          list models the server offers (free ones marked)
   init REPO [--allow CMD ...]     write a default-deny opencode.json into REPO
-  run --repo R --task SLUG (--prompt TEXT | --prompt-file F) [options]
+  run --repo R --task SLUG (--prompt TEXT | --prompt-file F) [--detach] [options]
+                                  `--detach` returns once the run is live and prints its log path
   diff --repo R --task SLUG [--last]   OpenCode's changes vs the task's base (or the last attempt)
   apply --repo R --task SLUG [--check] [--3way]
                                   apply the task's changes to the main checkout's working tree
@@ -716,7 +717,58 @@ class _Tee:
         self.secondary.flush()
 
 
+def run_detached(args):
+    """Start a run in its own process and return as soon as it is live. The child is this same
+    command with --detach swapped for the hidden --_detached; its output goes to a per-child
+    file under the task's log dir, and it starts its own session so it survives this process."""
+    repo = repo_root(Path(args.repo).resolve())
+    if not SLUG_RE.match(args.task):
+        die("--task must be lowercase letters, digits and hyphens (max 49 chars)")
+    out_dir = LOGS / repo.name / args.task
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"detach-{os.getpid()}.out"
+    out_fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    argv = ([sys.executable, str(Path(__file__).resolve())]
+            + [a for a in sys.argv[1:] if a != "--detach"] + ["--_detached"])
+    try:
+        child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out_fd,
+                                 stderr=subprocess.STDOUT, start_new_session=True,
+                                 env=dict(os.environ, PYTHONUNBUFFERED="1"))
+    finally:
+        os.close(out_fd)
+    lease = lease_path(repo.name, args.task)
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        rc = child.poll()
+        if rc is not None:
+            print(out_path.read_text(errors="replace"), end="")
+            return rc
+        try:
+            data = json.loads(lease.read_text())
+        except (OSError, ValueError):
+            data = {}
+        if data.get("pid") == child.pid and data.get("run_id"):
+            run_id = data["run_id"]
+            print(f"started {repo.name}/{args.task} (pid {child.pid}, run {run_id}); "
+                  f"log {out_dir / (run_id + '.log')}; follow with: "
+                  f"wait --repo {repo} --task {args.task}")
+            return EXIT_OK
+        time.sleep(0.5)
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        child.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
+    print("\n".join(out_path.read_text(errors="replace").splitlines()[-30:]))
+    return EXIT_ERROR
+
+
 def cmd_run(args):
+    if args.detach:
+        return run_detached(args)
     if not SLUG_RE.match(args.task):
         die("--task must be lowercase letters, digits and hyphens (max 49 chars)")
     if args.prompt_file:
@@ -1290,6 +1342,8 @@ def cmd_run(args):
             try:
                 aborted = abort_busy_sessions(wt, state)
                 if aborted:
+                    if session_id is None:
+                        session_id = aborted[0]
                     print(f"[abort] stopped server-side session(s): {', '.join(aborted)}", flush=True)
             except BaseException as e:
                 print(f"[WARN] could not abort busy sessions: {e}", flush=True)
@@ -1423,6 +1477,8 @@ def cmd_apply(args):
     """Apply the task's changes (base..HEAD) to the MAIN checkout's working tree. The only
     command that writes to the user's checkout; it never touches the index unless --3way."""
     repo, wt = task_worktree(args)
+    if lease_live(repo.name, args.task):
+        die(f"task {repo.name}/{args.task} has a live run; wait for it to finish (or stop it) first")
     meta = load_meta(repo, args.task, wt)
     ref = meta.get("ref") or task_ref_name(args.task, False)
     if task_changes(wt):
@@ -1472,6 +1528,8 @@ def cmd_apply(args):
 
 def cmd_remove(args):
     repo, wt = task_worktree(args)
+    if lease_live(repo.name, args.task):
+        die(f"task {repo.name}/{args.task} has a live run; wait for it to finish (or stop it) first")
     dirty = task_changes(wt)
     if dirty and not args.force:
         die(f"{wt} has {len(dirty)} uncommitted change(s); review/commit them or pass --force")
@@ -1502,6 +1560,8 @@ def cmd_remove(args):
 def cmd_land(args):
     """Apply a task, optionally commit exactly its files in the main checkout, then remove it."""
     repo, wt = task_worktree(args)
+    if lease_live(repo.name, args.task):
+        die(f"task {repo.name}/{args.task} has a live run; wait for it to finish (or stop it) first")
     meta = load_meta(repo, args.task, wt)
     ref = meta.get("ref") or task_ref_name(args.task, False)
     if task_changes(wt):
@@ -2134,6 +2194,9 @@ def main():
                         "(uncommitted and untracked, non-ignored files) instead of HEAD; land with `apply`")
     r.add_argument("--allow-secret-files", action="store_true",
                    help="with --from-working-tree: include untracked files whose names look like secrets")
+    r.add_argument("--detach", action="store_true",
+                   help="start the run in the background and return once it is live")
+    r.add_argument("--_detached", action="store_true", help=argparse.SUPPRESS)
     for name in ("diff", "remove", "apply"):
         p = sub.add_parser(name)
         p.add_argument("--repo", required=True)
