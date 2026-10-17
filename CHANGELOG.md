@@ -167,3 +167,8 @@ and packaged as the `opencode-delegate` Claude Code plugin.
 - Global auto-mode (a rule appended to `~/.claude/CLAUDE.md`) and the five toggle skills.
   Auto-delegation is now opted into per project, in that project's `CLAUDE.md`.
 - Estimated "manual completion" entries in the run log.
+
+[2.1.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.0.2...v2.1.0
+[2.0.2]: https://github.com/yaniv-golan/opencode-skill/compare/v2.0.1...v2.0.2
+[2.0.1]: https://github.com/yaniv-golan/opencode-skill/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/yaniv-golan/opencode-skill/releases/tag/v2.0.0
