@@ -35,7 +35,8 @@ assert:
   # expressible across calls with a regex; the two worktree paths below are the proxy)
   - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\srun\s[\s\S]*--task\s+[a-z0-9]+(-[a-z0-9]+)*'}, count: {min: 2}}
   - tool_called: {tool: Bash, input: {run_in_background: 'true'}, count: {min: 2}}
-  - tool_result_matches: 'ocd-harness/[a-z0-9-]+/worktrees/[^/\s]+/[a-z0-9-]+'
+  # Background runs' output never reaches a tool result, so evidence of the tasks is the branch names.
+  - transcript_matches: 'opencode/[a-z0-9-]+'
   - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\sdiff\s'}, count: {min: 2}}
   - tool_not_called: {tool: Bash, input: {command: 'git\s+push'}, scope: any}
   - tool_not_called: {tool: Bash, input: {command: '--unsafe-policy'}, scope: any}

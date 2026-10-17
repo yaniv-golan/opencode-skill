@@ -16,7 +16,9 @@ rm -rf "$OPENCODE_DELEGATE_HOME"; mkdir -p "$OPENCODE_DELEGATE_HOME"
 script="$here/../../opencode-delegate/skills/opencode/scripts/delegate.py"
 trap 'python3 "$script" server stop >/dev/null 2>&1 || true' EXIT
 case "$mode" in
-  record) cowork-harness record "$here/scenarios/$name.yaml" --out "$here/cassettes/$name.cassette.json" \
-            --max-budget-usd 15 --allow-host-inventory-fixture ${COWORK_EXTRA:-} ;;
+  record) budget="--max-budget-usd 15"
+          grep -q "^legs:" "$here/scenarios/$name.yaml" && budget=""   # not supported for multi-leg yet
+          cowork-harness record "$here/scenarios/$name.yaml" --out "$here/cassettes/$name.cassette.json" \
+            $budget --allow-host-inventory-fixture ${COWORK_EXTRA:-} ;;
   run)    cowork-harness run "$here/scenarios/$name.yaml" --keep ${COWORK_EXTRA:-} ;;
 esac
