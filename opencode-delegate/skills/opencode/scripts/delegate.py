@@ -1075,9 +1075,16 @@ def cmd_run(args):
     print(f"log      : {log_path}")
     print("======================", flush=True)
 
-    def write_lease(session=None):
+    lease_last = {"session": None, "client_pid": None}
+
+    def write_lease(session=None, client_pid=None):
+        if session is not None:
+            lease_last["session"] = session
+        if client_pid is not None:
+            lease_last["client_pid"] = client_pid
         data = json.dumps({"pid": os.getpid(), "started": lease_started,
-                           "session": session, "run_id": run_id}).encode()
+                           "session": lease_last["session"], "run_id": run_id,
+                           "client_pid": lease_last["client_pid"]}).encode()
         os.ftruncate(lease_fd, 0)
         os.pwrite(lease_fd, data, 0)
 
@@ -1128,6 +1135,7 @@ def cmd_run(args):
         t0 = time.time()
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                 stdin=subprocess.DEVNULL, env=env, cwd=wt, start_new_session=True)
+        write_lease(client_pid=proc.pid)
         q = queue.Queue()
         threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
         if delivered:
@@ -1230,7 +1238,8 @@ def cmd_run(args):
                     if reads[target] == 5:
                         print(f"{stamp()} [WARN] {target} read 5 times: OpenCode may be circling",
                               flush=True)
-                shown = str(target).replace(str(wt) + "/", "")[:110]
+                shown = (str(target).replace(str(wt) + "/", "")
+                         .replace(os.path.realpath(str(wt)) + "/", ""))[:110]
                 print(f"{stamp()} [{tool}] {shown}{extra}", flush=True)
                 if st.get("status") == "error":
                     msg = str(st.get("error") or st.get("output") or "")
@@ -2328,6 +2337,65 @@ def cmd_wait(args):
             mark_reported(rep_path, rid)
             reported.add(rid)
             printed = True
+
+        # A broker killed outright (SIGKILL) leaves an unlocked lease with a run_id and no run-log
+        # entry; lease_live is False and no other path will ever report it. Report it as crashed
+        # even when this `wait` never saw it live.
+        for task in tasks:
+            if lease_live(repo.name, task):
+                continue
+            lp = lease_path(repo.name, task)
+            if not lp.exists():
+                continue
+            try:
+                lease = json.loads(lp.read_text())
+            except (OSError, ValueError):
+                continue
+            rid = lease.get("run_id")
+            if not rid or rid in logged or rid in reported:
+                continue
+            cpid = lease.get("client_pid")
+            if cpid:
+                try:
+                    ps = subprocess.run(["ps", "-o", "command=", "-p", str(cpid)],
+                                        capture_output=True, text=True)
+                    if "opencode" in (ps.stdout or ""):
+                        try:
+                            os.killpg(cpid, signal.SIGTERM)
+                        except OSError:
+                            pass
+                except OSError:
+                    pass
+            aborted = []
+            try:
+                aborted = abort_busy_sessions(worktree_path(repo, task), _state())
+            except Exception as exc:
+                print(f"[WARN] could not abort sessions for {repo.name}/{task}: {exc}", flush=True)
+            if args.stream:
+                print(f"[crashed] {task} {rid}")
+            else:
+                print(f"=== CRASHED {repo.name}/{task} run {rid}: no result recorded; "
+                      f"aborted sessions: {', '.join(aborted)} ===")
+            sys.stdout.flush()
+            mark_reported(rep_path, rid)
+            reported.add(rid)
+            printed = True
+            try:
+                lfd = os.open(lp, os.O_RDWR)
+                try:
+                    try:
+                        fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        pass
+                    else:
+                        try:
+                            os.unlink(lp)
+                        finally:
+                            fcntl.flock(lfd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lfd)
+            except OSError:
+                pass
 
         for rid, task in list(seen_live.items()):
             if rid in reported or rid in logged or rid in live_now:
