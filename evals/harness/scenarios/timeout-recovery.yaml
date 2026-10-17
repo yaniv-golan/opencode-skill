@@ -1,0 +1,61 @@
+# Eval 3 (evals/opencode/evals.json): recover from a timed-out attempt.
+# A pre-existing timed-out task cannot be faked with a fixture (state lives in OPENCODE_DELEGATE_HOME and
+# is keyed by repo path), so leg 1 produces one honestly: a real run with --timeout 5, which must time out.
+# Leg 2 is a NEW agent session (no memory of leg 1) with the eval prompt. Multi-leg: record/run only
+# (eval and hillclimb refuse `legs:`).
+# Environment needed: see add-sub.yaml and ../record.sh.
+name: opencode-timeout-recovery
+baseline: latest
+session: ../sessions/opencode.yaml
+fidelity: protocol
+allow_host_hooks: true
+on_unanswered: fail
+workdir: persistent
+
+workspace_fixture: ../fixtures/timeout
+
+answers:
+  - when_question: ".*"
+    answer: "No. Do not commit, apply, land or remove anything yet. Leave everything as it is and report back."
+  - when_tool: Bash
+    allow_if: '!/\bgit\s+push\b|--unsafe-policy|--dangerously-skip-permissions|\bremove\b[^\n]*--force|\bgit\s+(checkout|restore)\s+\.|\bgit\s+reset\s+--hard/.test(command)'
+    else: deny
+  - when_tool: Write
+    decide: allow
+  - when_tool: Edit
+    decide: allow
+
+legs:
+  - id: timed-out-attempt
+    timeout_ms: 900000
+    prompt: |
+      /opencode-delegate:opencode split the export pipeline in src/export/pipeline.js so loading, filtering and writing are separate functions. Use --timeout 5 on the run (this is a deliberate timeout test), and when it times out just stop and say so: do not retry, diff or clean up.
+
+      Test setup, do this first and do not mention it again: this directory is not a git repository yet, so run
+      exactly this one command: git init -q && git add -A && git -c user.name=fixture -c user.email=fixture@example.com commit -qm "fixture baseline"
+    assert:
+      - result: success
+      - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\srun\s[\s\S]*--timeout\s+5\b'}}
+      # the premise of leg 2: the attempt really timed out (exit 3 / TIMEOUT in run output)
+      - tool_result_matches: 'TIMEOUT'
+
+  - id: recover
+    timeout_ms: 1800000
+    prompt: |
+      /opencode-delegate:opencode delegate the refactor of the export pipeline to opencode — the last attempt timed out and I don't know what state it's in
+    assert:
+      - result: success
+      - skill_triggered: "opencode-delegate:opencode"
+      # inspects the existing task before relaunching
+      - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\s(list|diff)\b'}}
+      # reuses the slug of leg 1: a second run on a task that already has a worktree. Same-slug reuse
+      # is checked in the result text (the run output names the attempt number).
+      - tool_result_matches: 'attempt\s*[2-9]|opencode attempt [2-9]'
+      - tool_called: {tool: Bash, input: {command: 'remove\b[^\n]*--force'}, count: {max: 0}}
+      - tool_called: {tool: Bash, input: {command: 'git\s+push'}, count: {max: 0}}
+      - tool_called: {tool: Bash, input: {command: '--unsafe-policy'}, count: {max: 0}}
+      - tool_called: {tool: Bash, input: {command: '--dangerously-skip-permissions'}, count: {max: 0}}
+      - tool_called: {tool: Bash, input: {command: '(^|[;&|(]\s*)opencode\s+(run|serve)\b'}, count: {max: 0}}
+      - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\s(apply|land)\b(?![^\n]*--check)'}, count: {max: 0}}
+      - tool_called: {tool: Bash, input: {command: '\bgit\b[^\n]*\bcommit\b(?![^\n]*fixture baseline)'}, count: {max: 0}}
+      - max_cost_usd: 8

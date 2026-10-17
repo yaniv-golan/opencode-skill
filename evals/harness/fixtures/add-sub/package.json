@@ -1,0 +1,8 @@
+{
+  "name": "math-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "check": "node --check math.js"
+  }
+}

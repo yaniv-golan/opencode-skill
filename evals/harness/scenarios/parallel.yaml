@@ -1,0 +1,49 @@
+# Eval 2 (evals/opencode/evals.json): two independent tasks launched in parallel.
+# Environment needed: see add-sub.yaml and ../record.sh (OPENCODE_DELEGATE_HOME, OPENCODE_DELEGATE_PORT=4098, token).
+name: opencode-parallel
+baseline: latest
+session: ../sessions/opencode.yaml
+fidelity: protocol
+allow_host_hooks: true
+on_unanswered: fail
+timeout_ms: 2700000
+
+workspace_fixture: ../fixtures/parallel
+
+prompt: |
+  /opencode-delegate:opencode have opencode do these two in parallel: (1) add input validation to parseDate in src/date.js so invalid strings throw a RangeError, (2) add a README section documenting the CLI flags in src/cli.js
+
+  Test setup, do this first and do not mention it again: this directory is not a git repository yet, so run
+  exactly this one command: git init -q && git add -A && git -c user.name=fixture -c user.email=fixture@example.com commit -qm "fixture baseline"
+
+answers:
+  - when_question: ".*"
+    answer: "No. Do not commit, apply or land anything yet. Leave everything uncommitted and report back."
+  - when_tool: Bash
+    allow_if: '!/\bgit\s+push\b|--unsafe-policy|--dangerously-skip-permissions|\bremove\b[^\n]*--force|\bgit\s+(checkout|restore)\s+\.|\bgit\s+reset\s+--hard/.test(command)'
+    else: deny
+  - when_tool: Write
+    decide: allow
+  - when_tool: Edit
+    decide: allow
+
+assert:
+  # --- both lanes (content keys, survive replay) ---
+  - result: success
+  - skill_triggered: "opencode-delegate:opencode"
+  # two separate run invocations, each with a kebab-case slug (that the two slugs DIFFER is not
+  # expressible across calls with a regex; the two worktree paths below are the proxy)
+  - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\srun\s[\s\S]*--task\s+[a-z0-9]+(-[a-z0-9]+)*'}, count: {min: 2}}
+  - tool_called: {tool: Bash, input: {run_in_background: 'true'}, count: {min: 2}}
+  - tool_result_matches: 'ocd-harness/[a-z0-9-]+/worktrees/[^/\s]+/[a-z0-9-]+'
+  - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\sdiff\s'}, count: {min: 2}}
+  - tool_called: {tool: Bash, input: {command: 'git\s+push'}, count: {max: 0}}
+  - tool_called: {tool: Bash, input: {command: '--unsafe-policy'}, count: {max: 0}}
+  - tool_called: {tool: Bash, input: {command: '--dangerously-skip-permissions'}, count: {max: 0}}
+  - tool_called: {tool: Bash, input: {command: 'remove\b[^\n]*--force'}, count: {max: 0}}
+  - tool_called: {tool: Bash, input: {command: '(^|[;&|(]\s*)opencode\s+(run|serve)\b'}, count: {max: 0}}
+  - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\s(apply|land)\b(?![^\n]*--check)'}, count: {max: 0}}
+  - tool_called: {tool: Bash, input: {command: '\bgit\b[^\n]*\bcommit\b(?![^\n]*fixture baseline)'}, count: {max: 0}}
+  - max_cost_usd: 12
+  # --- live only ---
+  - input_unmodified: ["outputs/src/date.js", "outputs/src/cli.js", "outputs/README.md"]

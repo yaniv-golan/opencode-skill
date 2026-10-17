@@ -1,0 +1,12 @@
+# Session for the opencode-delegate protocol-tier scenarios.
+# Isolation: this file cannot isolate the Claude config dir by itself. At `protocol`, with NO credential
+# in the environment, the harness keeps your REAL CLAUDE_CONFIG_DIR. Export CLAUDE_CODE_OAUTH_TOKEN
+# (or pass --dotenv) and it builds a clean managed config dir instead. record.sh requires the token.
+model: claude-sonnet-5-5
+effort: medium
+permission_mode: default
+permission_parity: cowork
+plugins:
+  config_dir: null
+  local_plugins:
+    - ../../../opencode-delegate

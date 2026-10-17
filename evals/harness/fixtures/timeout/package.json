@@ -1,0 +1,8 @@
+{
+  "name": "exporter-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "check": "node --check src/export/pipeline.js && node --check src/export/format.js"
+  }
+}
