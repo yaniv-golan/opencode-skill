@@ -26,13 +26,17 @@ Subcommands (all print plain text; exit codes below):
   agents [--repo R]               task worktrees: how many messages each has queued
   hook                            deliver this session's pending messages to a Claude Code hook
   pair --repo R --task A --with B   let two of the repo's tasks message each other
+  land --repo R --task SLUG [--commit -m MSG | --message-file F] [--keep]
+                                  apply, optionally commit exactly the task's files, then remove it
 
 Exit codes for `run`:
   0 changes made, syntax OK      2 ran but changed nothing (WROTE_NOTHING)
   3 timed out (session aborted)  4 OpenCode/model error
   5 changes made but syntax check failed
+  7 changes made but a --check failed or a file outside --only changed
   1 usage / setup error (nothing was delegated)
 Exit codes for `apply`: 0 applied (or --check clean), 2 nothing to apply, 6 conflicts (nothing changed)
+`land` returns apply's codes, plus 4 when applied but the commit failed (the task is kept)
 
 Environment:
   OPENCODE_DELEGATE_MODEL   default model (else opencode/deepseek-v4.1-flash-free)
@@ -45,7 +49,7 @@ Environment:
                             shell command OpenCode runs) and for --setup, e.g. a pinned
                             Node: ~/.nvm/versions/node/v24.18.0/bin. Read at server start.
 """
-import argparse, atexit, base64, contextlib, fcntl, hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
+import argparse, atexit, base64, contextlib, fcntl, fnmatch, hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
 import http.server
 import urllib.request, urllib.error
 from datetime import datetime, timezone, timedelta
@@ -69,6 +73,7 @@ DENIED_MARK = "prevents you from using this specific tool call"
 
 EXIT_OK, EXIT_USAGE, EXIT_NOTHING, EXIT_TIMEOUT, EXIT_ERROR, EXIT_SYNTAX = 0, 1, 2, 3, 4, 5
 EXIT_CONFLICT = 6
+EXIT_GATE = 7
 TASKS = HOME / "tasks"
 MSG = HOME / "msg"
 MSG_MAX_BYTES = 4096
@@ -761,6 +766,16 @@ def cmd_run(args):
                                     "created": datetime.now(timezone.utc).isoformat(),
                                     "snapshot_untracked": snap_untracked})
     meta = load_meta(repo, args.task, wt)
+    # --check/--only persist on the task so a later attempt of the same task re-runs/re-applies
+    # them even when the flags are omitted.
+    if args.check:
+        meta["checks"] = args.check
+        save_meta(repo, args.task, meta)
+    checks = meta.get("checks", [])
+    if args.only:
+        meta["only"] = args.only
+        save_meta(repo, args.task, meta)
+    scope = meta.get("only", [])
     policy = wt / POLICY_FILE
     copied_policy = False
     if not policy.exists() and (repo / POLICY_FILE).exists():
@@ -896,6 +911,17 @@ def cmd_run(args):
             brief = "\n".join(parts) + "\n" + prompt
             delivered.extend(m["id"] for m in pending)
             print(f"[messages] {len(pending)} queued message(s) added to the brief")
+        rules = ["", "", "RULES FOR THIS RUN (added by the delegate script):",
+                 "- Follow the repository's AGENTS.md if it has one.",
+                 "- Run each shell command on its own: no `&&`, `;`, `|` or subshells; "
+                 "chained commands are denied.",
+                 "- Do not commit, push or create branches.",
+                 "- Make the edits now; do not only describe them."]
+        if scope:
+            rules.append("- Change only these paths: " + ", ".join(scope) + ".")
+        if checks:
+            rules.append("- Afterwards the delegate runs these checks: " + "; ".join(checks) + ".")
+        brief = brief + "\n".join(rules)
         cmd = ["opencode", "run", "--attach", URL, "--dir", str(wt), "--auto", "-m", model,
                "--format", "json", "--title", f"delegate:{args.task}"]
         if args.variant:
@@ -1060,6 +1086,35 @@ def cmd_run(args):
         commits = git(wt, "log", "--oneline", f"{head}..{head_after}").strip() if head_after != head else ""
         checked, syntax_errors = syntax_check(wt, changed)
 
+        def in_scope(f):
+            for entry in scope:
+                if f == entry:
+                    return True
+                if (entry.endswith("/") or (wt / entry).is_dir()) and f.startswith(entry.rstrip("/") + "/"):
+                    return True
+                if fnmatch.fnmatchcase(f, entry):
+                    return True
+            return False
+
+        out_of_scope = [f for f in changed if scope and not in_scope(f)]
+        # Each check runs code OpenCode may have edited, so it gets the same minimal environment as
+        # OpenCode's own shells, never the caller's.
+        check_results = []
+        if checks and changed and not timed_out:
+            for c in checks:
+                try:
+                    r = subprocess.run(c, shell=True, cwd=wt, capture_output=True, text=True,
+                                       env=toolchain_env(server_env()), timeout=600)
+                    rcode, out = r.returncode, (r.stdout or "") + (r.stderr or "")
+                except subprocess.TimeoutExpired as e:
+                    rcode, out = "timeout", ""
+                    for s in (e.stdout, e.stderr):
+                        if s:
+                            out += s.decode(errors="replace") if isinstance(s, bytes) else s
+                check_results.append((rcode == 0, c, rcode, out))
+        checks_passed = sum(1 for ok, _, _, _ in check_results if ok)
+        checks_failed = len(check_results) - checks_passed
+
         print()
         if timed_out:
             outcome, code = "timeout", EXIT_TIMEOUT
@@ -1071,6 +1126,8 @@ def cmd_run(args):
             outcome, code = "syntax_errors", EXIT_SYNTAX
         else:
             outcome, code = "ok", EXIT_OK
+        if outcome == "ok" and (checks_failed or out_of_scope):
+            outcome, code = "gate_failed", EXIT_GATE
         print(f"=== OPENCODE {outcome.upper()} (opencode exit {rc}, {duration}s) ===")
         if commits:
             print("=== COMMITS CREATED BY OPENCODE (policy should have denied this) ===\n" + commits)
@@ -1082,10 +1139,23 @@ def cmd_run(args):
             for f in changed:
                 if after.get(f) == "??":
                     print(f" {f} (new, untracked)")
+        if out_of_scope:
+            print(f"=== OUT OF SCOPE ({len(out_of_scope)}) ===")
+            for f in out_of_scope:
+                print(f"  {f}")
         if checked:
             print(f"=== SYNTAX {'OK' if not syntax_errors else 'ERRORS'} ({checked} checked) ===")
             for e in syntax_errors:
                 print(f"  {e}")
+        if check_results:
+            print(f"=== CHECKS ({checks_passed} passed, {checks_failed} failed) ===")
+            for ok, c, rcode, out in check_results:
+                if ok:
+                    print(f"  PASS {c}")
+                else:
+                    print(f"  FAIL (exit {rcode}) {c}")
+                    for line in out.strip().splitlines()[-20:]:
+                        print(f"    {line}")
         if stats["denied"]:
             print(f"=== DENIED BY POLICY ({len(stats['denied'])}) ===")
             for d in stats["denied"][:20]:
@@ -1118,6 +1188,8 @@ def cmd_run(args):
                      timed_out=timed_out, timeout_secs=args.timeout, duration_secs=duration,
                      prompt_words=len(prompt.split()), files_changed=len(changed),
                      syntax_errors=len(syntax_errors), denied=len(stats["denied"]),
+                     checks_passed=checks_passed, checks_failed=checks_failed,
+                     out_of_scope=len(out_of_scope),
                      tool_errors=stats["tool_errors"], tool_calls=stats["tool_calls"],
                      tokens_in=stats["tokens_in"], tokens_out=stats["tokens_out"],
                      tokens_reasoning=stats["tokens_reasoning"],
@@ -1262,6 +1334,69 @@ def cmd_remove(args):
         print(f"deleted {branch}")
     elif not ref.startswith("refs/heads/"):
         print(f"kept {branch} (its commits stay reachable; delete with --delete-branch)")
+    return EXIT_OK
+
+
+def cmd_land(args):
+    """Apply a task, optionally commit exactly its files in the main checkout, then remove it."""
+    repo, wt = task_worktree(args)
+    meta = load_meta(repo, args.task, wt)
+    ref = meta.get("ref") or task_ref_name(args.task, False)
+    if task_changes(wt):
+        sha = commit_task_changes(wt, f"manual edits before apply: {args.task}")
+        sync_task_ref(wt, ref)
+        print(f"committed uncommitted worktree edits as {sha[:10]} before landing")
+    files = [f for f in git(wt, "diff", "--name-only", meta["base"], "HEAD").splitlines() if f]
+    if not files:
+        print("nothing to land")
+        return EXIT_NOTHING
+    if args.commit:
+        if (args.message is None) == (args.message_file is None):
+            die("--commit needs exactly one of -m/--message or --message-file")
+        status = git(repo, "status", "--porcelain", "--", *files)
+        dirty = [line for line in status.splitlines() if line.strip()]
+        if dirty:
+            die(f"{len(dirty)} of the task's files have your own uncommitted changes; "
+                f"land without --commit, or commit them first")
+    elif args.message is not None or args.message_file is not None:
+        die("-m/--message and --message-file require --commit")
+    rc = cmd_apply(argparse.Namespace(**vars(args), check=False, three_way=False, force=False))
+    if rc != EXIT_OK:
+        return rc
+    if args.commit:
+        existing = [f for f in files if (repo / f).exists()]
+        gone = [f for f in files if not (repo / f).exists()]
+        if existing:
+            git(repo, "add", "--", *existing)
+        if gone:
+            git(repo, "rm", "--cached", "--quiet", "--ignore-unmatch", "--", *gone)
+        msgfile = None
+        try:
+            if args.message is not None:
+                HOME.mkdir(parents=True, exist_ok=True)
+                msgfile = HOME / f"land-message-{os.getpid()}.txt"
+                fd = os.open(msgfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(args.message)
+            else:
+                msgfile = Path(args.message_file)
+            r = subprocess.run(["git", "-C", str(repo), "commit", "-q", "-F", str(msgfile), "--", *files],
+                               capture_output=True, text=True)
+        finally:
+            if args.message is not None and msgfile:
+                msgfile.unlink(missing_ok=True)
+        if r.returncode:
+            print(r.stderr.strip(), file=sys.stderr)
+            print(f"the task's changes were applied to {repo} but not committed; kept the task worktree",
+                  file=sys.stderr)
+            return EXIT_ERROR
+        sha = git(repo, "rev-parse", "--short", "HEAD").strip()
+        subject = git(repo, "log", "-1", "--format=%s").strip()
+        print(f"committed {sha}: {subject}")
+    if not args.keep:
+        rc = cmd_remove(argparse.Namespace(**vars(args), delete_branch=True, force=False))
+        if rc != EXIT_OK:
+            return rc
     return EXIT_OK
 
 
@@ -1806,6 +1941,11 @@ def main():
     r.add_argument("--setup", help="shell command run by this script (not OpenCode) in a NEW worktree, "
                                    "e.g. 'pnpm install --frozen-lockfile --offline'")
     r.add_argument("--unsafe-policy", action="store_true", help="delegate even if the policy check fails")
+    r.add_argument("--check", action="append", metavar="CMD",
+                   help="shell command this script runs in the worktree after OpenCode finishes "
+                        "(repeatable); a failure fails the run")
+    r.add_argument("--only", action="append", metavar="PATH",
+                   help="path the task may change (repeatable); edits outside it fail the run")
     r.add_argument("--from-working-tree", action="store_true",
                    help="NEW task only: start from a snapshot of the main checkout's current state "
                         "(uncommitted and untracked, non-ignored files) instead of HEAD; land with `apply`")
@@ -1848,6 +1988,14 @@ def main():
     pr.add_argument("--task", required=True)
     pr.add_argument("--with", dest="with_", required=True, metavar="TASK",
                     help="the other task in the same repo")
+    ld = sub.add_parser("land", help="apply a task, optionally commit exactly its files, then remove it")
+    ld.add_argument("--repo", required=True)
+    ld.add_argument("--task", required=True)
+    ld.add_argument("--commit", action="store_true",
+                    help="commit exactly the task's files in the main checkout (needs -m or --message-file)")
+    ld.add_argument("-m", "--message", help="commit message (requires --commit)")
+    ld.add_argument("--message-file", metavar="F", help="read the commit message from F (requires --commit)")
+    ld.add_argument("--keep", action="store_true", help="keep the task worktree and branch after landing")
     sub.add_parser("hook", help="deliver this session's pending task messages (Claude Code hook)")
     args = ap.parse_args()
 
@@ -1867,7 +2015,7 @@ def main():
     if args.cmd == "hook":
         return cmd_hook(args)
     return {"init": cmd_init, "run": cmd_run, "diff": cmd_diff, "list": cmd_list, "apply": cmd_apply,
-            "remove": cmd_remove, "report": cmd_report, "tell": cmd_tell, "answer": cmd_answer,
+            "remove": cmd_remove, "land": cmd_land, "report": cmd_report, "tell": cmd_tell, "answer": cmd_answer,
             "inbox": cmd_inbox, "agents": cmd_agents, "pair": cmd_pair}[args.cmd](args)
 
 

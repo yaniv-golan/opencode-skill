@@ -72,11 +72,13 @@ was verified against a real OpenCode server.
 - Python 3.9+ standard library only. No third-party packages, no shell-outs to GNU-only tools
   (`timeout`, GNU `date`, `sed -i` without a suffix). It must run on stock macOS and Linux.
 - Keep the CLI non-interactive with structured plain-text output. The documented exit codes
-  (0 ok, 1 refused, 2 wrote nothing, 3 timeout, 4 error, 5 syntax, 6 apply conflict) are a contract that `SKILL.md`
+  (0 ok, 1 refused, 2 wrote nothing, 3 timeout, 4 error, 5 syntax, 6 apply conflict, 7 a `--check` failed or a file outside `--only` changed) are a contract that `SKILL.md`
   depends on. Change both together, or not at all.
 - Keep it one file. A second script needs a reason the first can't absorb.
-- Pass prompts and paths as argv lists, never through a shell. `--setup` is the one intentional
-  `shell=True`, and it runs commands the *orchestrator* chose, not OpenCode.
+- Pass prompts and paths as argv lists, never through a shell. `--setup` and `--check` are the
+  only intentional `shell=True` uses; both run commands the *orchestrator* chose, not OpenCode.
+  A `--check` runs after OpenCode may have edited the code it calls, so it gets the server's
+  minimal environment, never the caller's.
 
 ## Skill rules (`SKILL.md`)
 
