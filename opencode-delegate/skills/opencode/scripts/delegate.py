@@ -45,7 +45,7 @@ Environment:
                             shell command OpenCode runs) and for --setup, e.g. a pinned
                             Node: ~/.nvm/versions/node/v24.18.0/bin. Read at server start.
 """
-import argparse, atexit, base64, fcntl, hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
+import argparse, atexit, base64, contextlib, fcntl, hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
 import http.server
 import urllib.request, urllib.error
 from datetime import datetime, timezone, timedelta
@@ -56,6 +56,7 @@ HOME = Path(os.environ.get("OPENCODE_DELEGATE_HOME", Path.home() / ".local/state
 PORT = int(os.environ.get("OPENCODE_DELEGATE_PORT", "4096"))
 URL = f"http://127.0.0.1:{PORT}"
 SERVER_FILE = HOME / "server.json"
+SERVER_LOCK = HOME / "server.lock"
 RUN_LOG = HOME / "runs.jsonl"
 WORKTREES = HOME / "worktrees"
 POLICY_FILE = "opencode.json"
@@ -214,6 +215,20 @@ def server_healthy(state=None):
         return False
 
 
+@contextlib.contextmanager
+def server_lock():
+    """Serialise server start/stop across processes: two `run`s racing to restart the server
+    could otherwise see a live-but-unrecorded one (recorded only once healthy) and refuse it.
+    Held only around start/stop, never during the OpenCode run itself."""
+    HOME.mkdir(parents=True, exist_ok=True)
+    fd = os.open(SERVER_LOCK, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def server_start(quiet=False):
     if not shutil.which("opencode"):
         die("opencode CLI not found on PATH (install: brew install opencode)")
@@ -291,6 +306,20 @@ def _pid_alive(pid):
     return "opencode" in r.stdout and "serve" in r.stdout
 
 
+def _server_gone(pid, timeout):
+    """Poll until the server's pid is gone and nothing answers on PORT."""
+    deadline = time.time() + timeout
+    while True:
+        if not _pid_alive(pid):
+            try:
+                socket.create_connection(("127.0.0.1", PORT), timeout=1).close()
+            except OSError:
+                return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
 def server_stop():
     state = _state()
     pid = state.get("pid")
@@ -309,6 +338,15 @@ def server_stop():
         print(f"stopped server pid {pid}")
     except ProcessLookupError:
         print(f"server pid {pid} was not running")
+    # Never release the record until the port is actually free: a caller that
+    # restarts at once would otherwise be refused as "held by a process this
+    # script did not start".
+    if not _server_gone(pid, 10):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _server_gone(pid, 5)
     SERVER_FILE.unlink(missing_ok=True)
 
 
@@ -664,18 +702,21 @@ def cmd_run(args):
             prev = "?"
         die(f"task {repo.name}/{args.task} is already running (pid {prev})")
 
-    state = server_start(quiet=True)
-    want = plugins_sha256()
-    if state.get("scrub_plugin") != want:
-        busy = [k for k, v in (api("GET", "/session/status", state) or {}).items()
-                if (v or {}).get("type") != "idle"]
-        if busy:
-            die("the running server was started without the current safety plugin and has "
-                f"{len(busy)} active session(s); wait for them, then `server stop` and retry")
-        print("[setup] restarting the server to load the current safety plugin")
-        server_stop()
+    # Serialise with other processes' starts/restarts: server_start re-reads the recorded state,
+    # so a server another process just started (or is mid-restart) is seen, not refused.
+    with server_lock():
         state = server_start(quiet=True)
-    models = {m[0]: m for m in list_models(state)}
+        want = plugins_sha256()
+        if state.get("scrub_plugin") != want:
+            busy = [k for k, v in (api("GET", "/session/status", state) or {}).items()
+                    if (v or {}).get("type") != "idle"]
+            if busy:
+                die("the running server was started without the current safety plugin and has "
+                    f"{len(busy)} active session(s); wait for them, then `server stop` and retry")
+            print("[setup] restarting the server to load the current safety plugin")
+            server_stop()
+            state = server_start(quiet=True)
+        models = {m[0]: m for m in list_models(state)}
     if model not in models:
         free = sorted(k for k, v in models.items() if v[1])
         die(f"model {model} not offered by the server. Free now: {', '.join(free) or 'none'}")
@@ -1753,7 +1794,12 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "server":
-        {"start": server_start, "stop": server_stop, "status": server_status}[args.action]()
+        fn = {"start": server_start, "stop": server_stop, "status": server_status}[args.action]
+        if args.action == "status":
+            fn()
+        else:
+            with server_lock():
+                fn()
         return EXIT_OK
     if args.cmd == "models":
         state = server_start(quiet=True)
