@@ -48,6 +48,8 @@ Environment:
   OPENCODE_DELEGATE_PATH_PREPEND  dir(s) put first on PATH for the server (so for every
                             shell command OpenCode runs) and for --setup, e.g. a pinned
                             Node: ~/.nvm/versions/node/v24.18.0/bin. Read at server start.
+  Each run also writes a log to HOME/logs/<repo>/<task>/<run_id>.log (a `latest` symlink points
+  at the newest); the same text goes to the terminal.
 """
 import argparse, atexit, base64, contextlib, fcntl, fnmatch, hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
 import http.server
@@ -63,6 +65,7 @@ SERVER_FILE = HOME / "server.json"
 SERVER_LOCK = HOME / "server.lock"
 RUN_LOG = HOME / "runs.jsonl"
 WORKTREES = HOME / "worktrees"
+LOGS = HOME / "logs"
 POLICY_FILE = "opencode.json"
 SCRUB_PLUGIN = Path(__file__).resolve().parent / "opencode-plugin" / "scrub-env.js"
 MESSAGING_PLUGIN = Path(__file__).resolve().parent / "opencode-plugin" / "messaging.js"
@@ -690,6 +693,29 @@ def syntax_check(wt, files):
     return checked, errors
 
 
+class _Interrupted(Exception):
+    """Raised from a signal handler so a signalled run unwinds through cmd_run's finally
+    (killing the child, aborting sessions, committing and logging) instead of dying mid-edit."""
+
+
+class _Tee:
+    """Mirror everything written to stdout into a run's log file."""
+
+    def __init__(self, primary, secondary):
+        self.primary = primary
+        self.secondary = secondary
+
+    def write(self, data):
+        n = self.primary.write(data)
+        self.secondary.write(data)
+        self.secondary.flush()
+        return n
+
+    def flush(self):
+        self.primary.flush()
+        self.secondary.flush()
+
+
 def cmd_run(args):
     if not SLUG_RE.match(args.task):
         die("--task must be lowercase letters, digits and hyphens (max 49 chars)")
@@ -706,12 +732,48 @@ def cmd_run(args):
     if args.from_working_tree and worktree_path(repo, args.task).exists():
         die(f"--from-working-tree only applies to a new task; {args.task} already has a worktree "
             f"(continue it without the flag, or pick a new --task)")
-    if lease_live(repo.name, args.task):
-        try:
-            prev = json.loads(lease_path(repo.name, args.task).read_text()).get("pid")
-        except (OSError, ValueError):
-            prev = "?"
-        die(f"task {repo.name}/{args.task} is already running (pid {prev})")
+    # Take the task's lease as a real lock, before anything is started. flock is the
+    # authority: a stale file whose process is gone does not block a new run.
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}"
+    lease_started = datetime.now(timezone.utc).isoformat()
+    lfile = lease_path(repo.name, args.task)
+    lfile.parent.mkdir(parents=True, exist_ok=True)
+    lease_fd = None
+    try:
+        lease_fd = os.open(lfile, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        if lease_fd is not None:
+            os.close(lease_fd)
+        die(f"task {repo.name}/{args.task} is already running")
+    except OSError as e:
+        if lease_fd is not None:
+            os.close(lease_fd)
+        die(f"could not take the lease {lfile}: {e}")
+
+    # A signalled run unwinds through the finally below instead of dying mid-edit.
+    prev_handlers = {}
+
+    def handle_signal(signum, frame):
+        raise _Interrupted(signum)
+
+    for _sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        prev_handlers[_sig] = signal.signal(_sig, handle_signal)
+
+    # Every run gets its own log; from here on stdout is mirrored into it.
+    log_dir = LOGS / repo.name / args.task
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{run_id}.log"
+    log_stream = os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w")
+    link_tmp = log_dir / f".latest-{os.getpid()}"
+    try:
+        link_tmp.unlink()
+    except OSError:
+        pass
+    os.symlink(log_path.name, link_tmp)
+    os.replace(link_tmp, log_dir / "latest")
+    orig_stdout = sys.stdout
+    sys.stdout = _Tee(orig_stdout, log_stream)
 
     # Serialise with other processes' starts/restarts: server_start re-reads the recorded state,
     # so a server another process just started (or is mid-restart) is seen, not refused.
@@ -877,15 +939,16 @@ def cmd_run(args):
           f"  attempts so far: {attempt_count(wt, meta['base'])}")
     print(f"model    : {model}")
     print(f"timeout  : {args.timeout}s")
+    print(f"log      : {log_path}")
     print("======================", flush=True)
-    lfile = lease_path(repo.name, args.task)
-    lfile.parent.mkdir(parents=True, exist_ok=True)
-    lease_started = datetime.now(timezone.utc).isoformat()
 
     def write_lease(session=None):
-        lfile.write_text(json.dumps({"pid": os.getpid(), "started": lease_started,
-                                     "session": session}))
+        data = json.dumps({"pid": os.getpid(), "started": lease_started,
+                           "session": session, "run_id": run_id}).encode()
+        os.ftruncate(lease_fd, 0)
+        os.pwrite(lease_fd, data, 0)
 
+    proc, finished, t0, session_id, interrupted = None, False, None, None, None
     try:
         write_lease()
 
@@ -1185,6 +1248,7 @@ def cmd_run(args):
 
         HOME.mkdir(parents=True, exist_ok=True)
         entry = dict(ts=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), delegate="opencode",
+                     run_id=run_id,
                      project=repo.name, repo=str(repo), task=args.task, worktree=str(wt), model=model,
                      session=session_id, outcome=outcome, exit_code=code, opencode_exit=rc,
                      timed_out=timed_out, timeout_secs=args.timeout, duration_secs=duration,
@@ -1200,11 +1264,89 @@ def cmd_run(args):
                      messages_dropped=endpoint.dropped)
         with open(RUN_LOG, "a") as fh:
             fh.write(json.dumps(entry) + "\n")
+        finished = True
         return code
+    except _Interrupted as e:
+        interrupted = e
+        return EXIT_ERROR
     finally:
-        endpoint.close()
-        tokfile.unlink(missing_ok=True)
-        lfile.unlink(missing_ok=True)
+        # A second signal must not interrupt the cleanup below: ignore these until the
+        # lease is released, then restore the caller's handlers as the very last step.
+        for _sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(_sig, signal.SIG_IGN)
+        if not finished:
+            # (a) stop the OpenCode process if it is still running
+            try:
+                if proc is not None and proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait()
+            except BaseException as e:
+                print(f"[WARN] could not stop the OpenCode process: {e}", flush=True)
+            # (b) abort every session still busy in this worktree
+            try:
+                aborted = abort_busy_sessions(wt, state)
+                if aborted:
+                    print(f"[abort] stopped server-side session(s): {', '.join(aborted)}", flush=True)
+            except BaseException as e:
+                print(f"[WARN] could not abort busy sessions: {e}", flush=True)
+            # (c) commit what the interrupted run left, as a normal attempt
+            try:
+                if task_changes(wt):
+                    n = attempt_count(wt, meta["base"]) + 1
+                    message = (f"opencode attempt {n}: {args.task} (interrupted)\n\n"
+                               f"model {model}, session {session_id}")
+                    sha = commit_task_changes(wt, message)
+                    if sha:
+                        print(f"attempt {n} committed as {sha[:10]} on {ref_label(ref)}", flush=True)
+                sync_task_ref(wt, ref)
+            except BaseException as e:
+                print(f"[WARN] could not commit the interrupted worktree: {e}", flush=True)
+            # (d) log the interruption with the fields we have (never invent any)
+            try:
+                entry = dict(ts=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             delegate="opencode", run_id=run_id, project=repo.name, repo=str(repo),
+                             task=args.task, worktree=str(wt), model=model,
+                             outcome="interrupted", exit_code=EXIT_ERROR)
+                if session_id is not None:
+                    entry["session"] = session_id
+                if t0 is not None:
+                    entry["duration_secs"] = round(time.time() - t0, 1)
+                HOME.mkdir(parents=True, exist_ok=True)
+                with open(RUN_LOG, "a") as fh:
+                    fh.write(json.dumps(entry) + "\n")
+            except BaseException as e:
+                print(f"[WARN] could not write the interrupted run-log entry: {e}", flush=True)
+            # (e) tell the reader
+            try:
+                print(f"=== OPENCODE INTERRUPTED (signal {interrupted}) ===", flush=True)
+            except BaseException:
+                pass
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        sys.stdout = orig_stdout
+        try:
+            log_stream.flush()
+            log_stream.close()
+        except Exception:
+            pass
+        try:
+            cleanup_endpoint()
+        except Exception as e:
+            print(f"[WARN] could not close the messaging endpoint: {e}", flush=True)
+        try:
+            os.unlink(lfile)
+        except OSError:
+            pass
+        if lease_fd is not None:
+            os.close(lease_fd)
+        for _sig, _prev in prev_handlers.items():
+            signal.signal(_sig, _prev)
 
 
 # ── inspection ──────────────────────────────────────────────────────────────
@@ -1474,20 +1616,29 @@ def lease_path(repo_name, slug):
 
 
 def lease_live(repo_name, slug):
-    """True if a live run holds this task's lease (its pid is still a process)."""
-    try:
-        pid = json.loads(lease_path(repo_name, slug).read_text()).get("pid")
-    except (OSError, ValueError):
-        return False
-    if not pid:
+    """True if a live run holds this task's lease (its flock is held). The pid in the
+    JSON is informational only; the lock is the authority."""
+    path = lease_path(repo_name, slug)
+    if not path.exists():
         return False
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
         return False
-    except PermissionError:
-        return True
-    return True
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
+    finally:
+        os.close(fd)
 
 
 def envelope_sig(token, msg_id):
@@ -2047,9 +2198,13 @@ def main():
         return EXIT_OK
     if args.cmd == "hook":
         return cmd_hook(args)
-    return {"init": cmd_init, "run": cmd_run, "diff": cmd_diff, "list": cmd_list, "apply": cmd_apply,
-            "remove": cmd_remove, "land": cmd_land, "report": cmd_report, "tell": cmd_tell, "answer": cmd_answer,
-            "inbox": cmd_inbox, "agents": cmd_agents, "pair": cmd_pair}[args.cmd](args)
+    try:
+        return {"init": cmd_init, "run": cmd_run, "diff": cmd_diff, "list": cmd_list, "apply": cmd_apply,
+                "remove": cmd_remove, "land": cmd_land, "report": cmd_report, "tell": cmd_tell,
+                "answer": cmd_answer, "inbox": cmd_inbox, "agents": cmd_agents, "pair": cmd_pair}[args.cmd](args)
+    except _Interrupted as e:
+        print(f"=== OPENCODE INTERRUPTED before the run started (signal {e}) ===", flush=True)
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":
