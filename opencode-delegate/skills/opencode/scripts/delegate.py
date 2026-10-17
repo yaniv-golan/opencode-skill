@@ -1049,11 +1049,17 @@ def cmd_run(args):
     if problems and not args.unsafe_policy:
         refuse(problems, f"the server's effective config for {wt}")
     # The config request above re-created the instance, which loads plugins.
+    # Poll for the heartbeat: a slow-loading instance may install a repo's own .opencode/
+    # packages before the plugin writes it, so a single immediate check yields false refusals.
     hb = heartbeat_file(wt)
-    try:
-        fresh = json.loads(hb.read_text()).get("loaded", 0) / 1000 >= disposed_at - 1
-    except (OSError, ValueError):
-        fresh = False
+    while True:
+        try:
+            fresh = json.loads(hb.read_text()).get("loaded", 0) / 1000 >= disposed_at - 1
+        except (OSError, ValueError):
+            fresh = False
+        if fresh or time.time() - disposed_at >= 30:
+            break
+        time.sleep(0.25)
     if not fresh:
         discard_if_new()
         die(f"refusing to delegate: the safety plugin did not load for {wt} "
