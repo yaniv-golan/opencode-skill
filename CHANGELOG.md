@@ -25,6 +25,14 @@ versions follow [Semantic Versioning](https://semver.org/).
   checks, because checks execute that code outside any OpenCode policy.
 
 ### Fixed
+- Tolerate OpenCode server stalls: while a session is busy the server can stop answering HTTP for
+  tens of seconds. API calls now retry for up to two minutes, a stalled server is waited out
+  instead of refused, and `server status` reports a stall instead of "not running".
+- Default `--timeout` raised to 1800 s; free-model runs sometimes take 15–20 minutes.
+- The skill's docs: where tasks start (`--base`, `--from-working-tree`), use OpenCode's grep tool
+  rather than shell grep, never pass `--unsafe-policy` to get past a refusal, the exact secret-name
+  list, private refs only when the snapshot differs from `HEAD`, `apply`'s exit codes and its
+  pre-apply commit, and model data terms pointing to OpenCode Zen.
 - `remove --delete-branch` checks first and changes nothing when the branch holds attempts that
   were neither applied nor merged; an applied branch can now be deleted without `--force`.
 

@@ -144,12 +144,27 @@ def _auth_header(state):
     return {"Authorization": "Basic " + base64.b64encode(f"opencode:{pw}".encode()).decode()}
 
 
-def api(method, path, state=None, timeout=10):
+# The OpenCode server can stop answering HTTP (even /global/health) for tens of seconds while a
+# session is busy (observed on 1.19.3). Every call used during a run retries until `patience`
+# seconds have passed. Only idempotent calls go through here (GET, dispose, abort).
+STALL_PATIENCE = 120
+
+
+def api(method, path, state=None, timeout=10, patience=STALL_PATIENCE):
     state = _state() if state is None else state
-    req = urllib.request.Request(URL + path, method=method, headers=_auth_header(state))
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        body = r.read()
-    return json.loads(body) if body else None
+    deadline = time.time() + patience
+    while True:
+        req = urllib.request.Request(URL + path, method=method, headers=_auth_header(state))
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body = r.read()
+            return json.loads(body) if body else None
+        except urllib.error.HTTPError:
+            raise  # the server answered; not a stall
+        except (urllib.error.URLError, OSError):
+            if time.time() + 2 >= deadline:
+                raise
+            time.sleep(2)
 
 
 def server_healthy(state=None):
@@ -159,7 +174,7 @@ def server_healthy(state=None):
     if not state.get("password"):
         return False
     try:
-        if not api("GET", "/global/health", state, timeout=3).get("healthy"):
+        if not api("GET", "/global/health", state, timeout=3, patience=0).get("healthy"):
             return False
     except (urllib.error.URLError, OSError, ValueError, AttributeError):
         return False
@@ -181,9 +196,17 @@ def server_start(quiet=False):
             print(f"server already running at {URL} (pid {state.get('pid', '?')})")
         return state
     if _pid_alive(state.get("pid")):
-        # Ours, alive, but not answering: never start a second one beside it.
-        die(f"the server this script started (pid {state['pid']}) is running but not answering "
-            f"health checks; retry shortly, or `server stop` to restart it")
+        # Ours and alive but not answering: usually a busy-session stall. Wait it out, and never
+        # start a second server beside it.
+        deadline = time.time() + STALL_PATIENCE
+        while time.time() < deadline:
+            time.sleep(2)
+            if server_healthy(state):
+                if not quiet:
+                    print(f"server already running at {URL} (pid {state.get('pid', '?')}; recovered from a stall)")
+                return state
+        die(f"the server this script started (pid {state['pid']}) has not answered health checks for "
+            f"{STALL_PATIENCE}s; `server stop` to restart it")
     # Anything else listening on the port is not ours. A plain TCP connect, so a
     # slow or busy foreign server is not mistaken for a free port.
     try:
@@ -269,6 +292,9 @@ def server_status():
         active = [k for k, v in sessions.items() if (v or {}).get("type") != "idle"]
         print(f"running at {URL} pid {state.get('pid')} version {info.get('version')} "
               f"node {state.get('node')} active sessions: {len(active)}")
+    elif _pid_alive(state.get("pid")):
+        print(f"running at {URL} pid {state.get('pid')} but not answering right now "
+              f"(usually a busy-session stall; it recovers on its own)")
     else:
         print(f"not running (expected at {URL})")
 
@@ -1088,7 +1114,7 @@ def main():
     i = sub.add_parser("init", help="write a default-deny opencode.json")
     i.add_argument("repo")
     i.add_argument("--allow", action="append", metavar="PATTERN",
-                   help='extra bash allow pattern, e.g. "pnpm check" or "pnpm test:unit*" (repeatable)')
+                   help='extra bash allow pattern; prefer exact commands, e.g. "pnpm check" or "pnpm test:unit" (repeatable)')
     i.add_argument("--model", help="also pin this model in the project config")
     r = sub.add_parser("run", help="delegate one task")
     r.add_argument("--repo", required=True)
@@ -1098,7 +1124,7 @@ def main():
     g.add_argument("--prompt-file")
     r.add_argument("--model")
     r.add_argument("--variant", help="reasoning effort variant, e.g. high")
-    r.add_argument("--timeout", type=int, default=900, help="seconds (default 900; free models queue)")
+    r.add_argument("--timeout", type=int, default=1800, help="seconds (default 1800; free models queue)")
     r.add_argument("--base", help="git ref for a NEW worktree (default HEAD of the main checkout)")
     r.add_argument("--setup", help="shell command run by this script (not OpenCode) in a NEW worktree, "
                                    "e.g. 'pnpm install --frozen-lockfile --offline'")

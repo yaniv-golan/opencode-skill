@@ -33,12 +33,13 @@ and pass it along verbatim, including to any sub-agent. `delegate.py --help` lis
 - **Isolation.** `run --task <slug>` creates `~/.local/state/opencode-delegate/worktrees/<repo>/<slug>`
   on branch `opencode/<slug>` from the main checkout's `HEAD`, `--base`, or — with
   `--from-working-tree` — a snapshot of the user's current files (uncommitted and untracked,
-  non-ignored), taken without touching their index, files or stash. A snapshot task's commits live
-  on the private ref `refs/opencode-delegate/tasks/<slug>` (detached worktree) instead of a branch,
-  so `git push --all` never publishes the user's uncommitted files. Re-running the same `--task`
+  non-ignored), taken without touching their index, files or stash. When that snapshot differs from
+  `HEAD`, the task's commits live on the private ref `refs/opencode-delegate/tasks/<slug>` (detached
+  worktree) instead of a branch, so `git push --all` never publishes the user's uncommitted files; a
+  clean tree gives an ordinary `opencode/<slug>` branch. Re-running the same `--task`
   reuses that worktree, so a retry builds on the previous attempt.
-- **Attempts are commits.** After each run the script commits OpenCode's changes on the task branch
-  as `opencode attempt N` (bot identity, git hooks disabled). Retries never lose earlier work, and
+- **Attempts are commits.** After each run the script commits OpenCode's changes on the task's
+  branch or private ref as `opencode attempt N` (bot identity, git hooks disabled). Retries never lose earlier work, and
   `diff --last` shows only the latest attempt.
 - **One server.** All runs attach to a single password-protected `opencode serve` on
   127.0.0.1:4096 (started on demand). Separate `opencode run` processes share a SQLite DB and fail
@@ -47,10 +48,10 @@ and pass it along verbatim, including to any sub-agent. `delegate.py --help` lis
   commands (`"bash": {"*": "deny", …}`) and edits outside the worktree (`external_directory: deny`).
   Runs use `--auto`, which approves anything merely set to `ask`, so an allowlist is the only shape
   that holds. The server's per-directory config cache is reset before every run.
-- **Bounded.** Wall-clock `--timeout` (default 900 s); on expiry the server-side session is aborted,
+- **Bounded.** Wall-clock `--timeout` (default 1800 s); on expiry the server-side session is aborted,
   not just the client.
 - **Evidence.** Changed files are computed from `git status` before/after (OpenCode's changes only),
-  syntax-checked (.py/.js/.mjs/.cjs/.json/.sh), and logged to `~/.local/state/opencode-delegate/runs.jsonl`.
+  syntax-checked (.py/.js/.mjs/.cjs/.json/.sh/.bash), and logged to `~/.local/state/opencode-delegate/runs.jsonl`.
 
 ## Step 0 — Is the repo set up?
 
@@ -100,33 +101,36 @@ CONSTRAINTS:
 - <exact signature if a function is defined or called: `export function sub(a, b): number`>
 
 VERIFY: run `<an allowlisted check command>` and confirm it passes;
-        grep for "<symbol>" in <file> to confirm it exists.
+        use the grep tool (not shell grep) to find "<symbol>" in <file>.
 Run each command on its own (no `&&`, `;` or pipes). Do not commit.
 Make the edits now; do not just describe them.
 ```
 
 One objective per brief. Name the files. Give a VERIFY step OpenCode can actually run under the
-policy (an allowlisted command, or grep/read, which are always allowed). Write long briefs to a file
+policy: an allowlisted command, or OpenCode's own grep/read tools, which the policy allows. Shell
+`grep`, `cat` or `echo` are denied unless allowlisted, and a denied command wastes turns. Write long briefs to a file
 and pass `--prompt-file`.
 
 ## Step 3 — Launch
 
-    python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py run --repo <repo> --task <slug> --prompt-file <brief.md> [--timeout 900] [--model …] [--setup "<cmd>"]
+    python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py run --repo <repo> --task <slug> --prompt-file <brief.md> [--timeout 1800] [--model …] [--setup "<cmd>"]
 
 - `--task`: short kebab-case slug, unique per independent task (`fix-date-parse`).
 - `--from-working-tree` (new task only): when the task depends on the user's uncommitted work.
-  It lists every untracked file it includes and refuses secret-looking names (`.env*`, `*.pem`,
-  `*.key`, `id_*`) unless `--allow-secret-files`; never pass that without asking the user.
+  It lists every untracked file it includes and refuses secret-looking untracked names (`.env*`;
+  `.pem/.key/.p12/.pfx/.kdbx/.keystore/.jks` files; `id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`
+  keys; `credentials*`, `.netrc`, `.npmrc`, `.pypirc`) unless `--allow-secret-files`; never pass
+  that without asking the user.
 - `--setup`: a command **the script** (not OpenCode) runs once in a new worktree — e.g.
   `"pnpm install --frozen-lockfile --offline"` — because a fresh worktree has no `node_modules` or
   other untracked build state.
-- Free models queue: even a trivial task often takes 2–5 minutes. Launch with your Bash tool's
+- Free models queue: even a trivial task usually takes 2–5 minutes and sometimes 15–20. Launch with your Bash tool's
   background option and wait for the completion notice rather than polling; launch parallel tasks
   together.
 
 ## Step 4 — Read the result
 
-The script streams `[tool] target` lines with elapsed seconds, then a summary.
+The script streams `[tool] target` lines with elapsed seconds, then a summary. Exit codes of `run`:
 
 | Exit | Outcome | What to do |
 |---|---|---|
@@ -135,7 +139,7 @@ The script streams `[tool] target` lines with elapsed seconds, then a summary.
 | 3 | `TIMEOUT` — session aborted | `diff` to see partial work; split the task or raise `--timeout` |
 | 4 | `ERROR` — model/server error | Retry once; if repeated, try another model (`models`) |
 | 5 | `SYNTAX_ERRORS` | Re-delegate on the same `--task` with the error text, or fix if trivial |
-| 1 | Refused before delegating | Read the message (policy, model, slug, setup) |
+| 1 | Refused before delegating | Read the message (policy, model, slug, setup). Fix the cause; **never pass `--unsafe-policy`** to get past a policy refusal unless the user explicitly tells you to |
 
 Red flags in the stream: `[DENIED]` (OpenCode tried a command the policy blocks — usually it should
 not need it; widen the allowlist only for a legitimate project check, and tell the user),
@@ -187,7 +191,9 @@ With the user's go-ahead, land it in one of two ways:
       python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py apply --repo <repo> --task <slug> --check
       python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py apply --repo <repo> --task <slug>
 
-  Exit 6 means conflicts and nothing was changed: re-run the task with `--from-working-tree` on a
+  `apply` first commits any edits still uncommitted in the worktree (as `manual edits before
+  apply`). Exit codes of `apply`: 0 applied (or `--check` clean), 2 nothing to apply or already
+  applied, 6 conflicts. Exit 6 means nothing was changed: re-run the task with `--from-working-tree` on a
   new `--task`, or ask before `--3way` (it touches the index and can leave conflict markers). The
   user then reviews and commits as they normally would.
 - **Merge or cherry-pick `opencode/<slug>`**, only for tasks based on a commit, following the repo's
@@ -198,7 +204,8 @@ Clean up afterwards:
     python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py remove --repo <repo> --task <slug> [--delete-branch]
 
 `remove` refuses while the worktree has uncommitted changes (`--force` discards them — only on the
-user's say-so). Task branches and refs are local working state: don't push them, and never use
+user's say-so). `remove --delete-branch` also refuses, and removes nothing, while the task's attempts
+were neither applied nor merged. Task branches and refs are local working state: don't push them, and never use
 `git push --mirror` in a repo with snapshot tasks (it pushes every ref, including
 `refs/opencode-delegate/*`). `remove --delete-branch` deletes the branch or private ref too.
 
@@ -208,12 +215,11 @@ Default: `opencode/deepseek-v4.1-flash-free` (override per run with `--model`, o
 `OPENCODE_DELEGATE_MODEL`). `delegate.py models` lists what the server offers right now; free
 models are "limited time" and the list changes, so check it rather than trusting any hard-coded name.
 
-- `opencode/deepseek-v4.1-flash-free` and `opencode/glm-5.3-flash-free`: zero-retention, both
-  handled real edits under this setup. DeepSeek leads vendor agentic-coding benchmarks; GLM tends to
-  self-verify more. The margin is thin — `report` compares them on your own runs.
-- Nemotron `*-free`: NVIDIA trial endpoints log everything ("do not submit confidential data") and
-  were slow or unavailable in testing. Avoid for private code.
-- Read each free model's data terms before using it on private code; some allow training on inputs.
+- Free models change and so do their data terms: some are zero-retention, others log or train on
+  what you send. Before using one on private code, check its terms at https://opencode.ai/zen (as
+  of OpenCode 1.19.3, DeepSeek V4.1 Flash and GLM-5.3-Flash were listed as zero-retention, and
+  NVIDIA's Nemotron trial endpoints as logging everything).
+- `report` compares models on your own runs; prefer that to benchmarks.
 
 ## Gotchas
 
@@ -221,14 +227,17 @@ models are "limited time" and the list changes, so check it rather than trusting
   accepts it, so you cannot tell what it does. The script uses `--auto` plus the policy.
 - **The policy is not a sandbox.** OpenCode can edit any file in the worktree, including a test
   script it is then allowed to run. Isolation (worktree) and your review are the real safety net.
-- **Worktrees start from committed `HEAD`.** The user's uncommitted work is invisible to OpenCode.
-  If the task depends on it, ask the user to commit first, or pass `--base`.
+- **Where a task starts.** By default from the main checkout's committed `HEAD`, so uncommitted work
+  is invisible to OpenCode. `--base <ref>` starts from another commit; `--from-working-tree` starts
+  from a snapshot of the user's current files and must be landed with `apply`. Both apply to a new
+  task only.
 - **What OpenCode's shells can see.** The server starts with a minimal environment (PATH, HOME,
   locale, proxy and toolchain basics, plus `OPENCODE_*` settings), because every command OpenCode
   runs inherits it. Pass anything else explicitly with `OPENCODE_DELEGATE_PASS_ENV=NAME,…`. A
   bundled server plugin also blanks the server password inside every OpenCode shell; the run is
-  refused if that plugin did not load. This is risk reduction, not isolation: the same user can still
-  read the password from the state dir, and any credential files.
+  refused if that plugin did not load. This is risk reduction, not isolation: any process running as
+  the user can still read the password from the state dir or from the server's own environment
+  (`ps -E`), and any credential files.
 - **Pinned toolchains.** OpenCode's shell commands run with the *server's* PATH, shared by every
   repo. If a repo pins Node (`.nvmrc`) the script warns on mismatch; fix it with
   `server stop`, then start again with `OPENCODE_DELEGATE_PATH_PREPEND=<pinned node bin dir>` set
@@ -248,6 +257,9 @@ models are "limited time" and the list changes, so check it rather than trusting
 - **A timed-out run is fully stopped.** If the client is killed while the request is still queued,
   the server-side session would otherwise keep running and edit the worktree after the run was
   reported (observed). The script aborts every busy session in the worktree on exit and before each run.
+- **The server can stall.** While a session is busy, the OpenCode server sometimes stops answering
+  for tens of seconds. The script waits up to two minutes before giving up; `server status` says
+  "not answering right now" during one. Don't `server stop` a stalled server unless it stays stuck.
 - `server stop` ends every active session; `server status` shows how many are running.
 
 ## Auto-delegation for one project
