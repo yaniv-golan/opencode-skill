@@ -62,6 +62,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"
+SUPPORTED_MAJOR = 1
 HOME = Path(os.environ.get("OPENCODE_DELEGATE_HOME", Path.home() / ".local/state/opencode-delegate"))
 PORT = int(os.environ.get("OPENCODE_DELEGATE_PORT", "4096"))
 URL = f"http://127.0.0.1:{PORT}"
@@ -176,6 +177,36 @@ def die(msg, code=EXIT_USAGE):
     sys.exit(code)
 
 
+_OPENCODE_VERSION = False
+
+
+def opencode_version():
+    """The `opencode --version` string (first N.N.N token), or None if it can't be read.
+    Read once per process."""
+    global _OPENCODE_VERSION
+    if _OPENCODE_VERSION is not False:
+        return _OPENCODE_VERSION
+    _OPENCODE_VERSION = None
+    try:
+        r = subprocess.run(["opencode", "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return _OPENCODE_VERSION
+    m = re.search(r"\d+\.\d+\.\d+", r.stdout or "")
+    if m:
+        _OPENCODE_VERSION = m.group(0)
+    return _OPENCODE_VERSION
+
+
+def require_supported_opencode():
+    v = opencode_version()
+    if not v or int(v.split(".")[0]) != SUPPORTED_MAJOR:
+        die(f"OpenCode {v or 'of unknown version'} is not supported: this script is tested on "
+            f"OpenCode 1.x (1.19.3), and OpenCode 2 changed the server API, permissions and "
+            f"plugins it relies on. Install OpenCode 1: brew install anomalyco/tap/opencode "
+            f"(macOS/Linux with Homebrew), or curl -fsSL https://opencode.ai/install | bash, "
+            f"or npm install -g opencode-ai@1.")
+
+
 def git(repo, *args, check=True):
     r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
     if check and r.returncode != 0:
@@ -247,6 +278,27 @@ def server_healthy(state=None):
         return False
 
 
+def server_version(state):
+    """The version the running server reports on /global/health, or None if it can't be read."""
+    try:
+        return (api("GET", "/global/health", state, timeout=3, patience=0) or {}).get("version")
+    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+        return None
+
+
+def refuse_unsupported_server(state):
+    """Refuse to reuse a live server whose major version is not SUPPORTED_MAJOR: treat it
+    like a foreign server, so a leftover OpenCode 2 server is never used. Refuse only when a
+    version was read and its major differs; if server_version returns None (a busy server can
+    stall for tens of seconds), return and let the existing checks proceed."""
+    v = server_version(state)
+    if v and int(str(v).split(".")[0]) != SUPPORTED_MAJOR:
+        die(f"the server at {URL} is OpenCode {v}, which this script "
+            f"does not support (it is tested on OpenCode 1.x; OpenCode 2 changed the server API, "
+            f"permissions and plugins it relies on); stop it "
+            f"(see `lsof -nP -iTCP:{PORT} -sTCP:LISTEN`) or set OPENCODE_DELEGATE_PORT")
+
+
 @contextlib.contextmanager
 def server_lock():
     """Serialise server start/stop across processes: two `run`s racing to restart the server
@@ -264,8 +316,10 @@ def server_lock():
 def server_start(quiet=False):
     if not shutil.which("opencode"):
         die("opencode CLI not found on PATH (install: brew install opencode)")
+    require_supported_opencode()
     state = _state()
     if server_healthy(state):
+        refuse_unsupported_server(state)
         if not quiet:
             print(f"server already running at {URL} (pid {state.get('pid', '?')})")
         return state
@@ -276,6 +330,7 @@ def server_start(quiet=False):
         while time.time() < deadline:
             time.sleep(2)
             if server_healthy(state):
+                refuse_unsupported_server(state)
                 if not quiet:
                     print(f"server already running at {URL} (pid {state.get('pid', '?')}; recovered from a stall)")
                 return state
@@ -870,6 +925,7 @@ def cmd_run(args):
     if args.from_working_tree and worktree_path(repo, args.task).exists():
         die(f"--from-working-tree only applies to a new task; {args.task} already has a worktree "
             f"(continue it without the flag, or pick a new --task)")
+    require_supported_opencode()
     # Take the task's lease as a real lock, before anything is started. flock is the
     # authority: a stale file whose process is gone does not block a new run.
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}"
