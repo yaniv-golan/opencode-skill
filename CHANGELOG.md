@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.1.2] - 2026-10-17
 
 ### Fixed
 - A server restart (to load the current safety plugin) or `server stop` can no longer land
@@ -201,6 +201,7 @@ and packaged as the `opencode-delegate` Claude Code plugin.
   Auto-delegation is now opted into per project, in that project's `CLAUDE.md`.
 - Estimated "manual completion" entries in the run log.
 
+[2.1.2]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/yaniv-golan/opencode-skill/compare/v2.0.1...v2.0.2

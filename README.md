@@ -218,6 +218,14 @@ wildcards on them (`node *`, `python *`, `npx *`, `pnpm exec *`), `sh`, `curl`, 
 | `OPENCODE_DELEGATE_PATH_PREPEND` | Directories put first on PATH for the server, and so for every command OpenCode runs, e.g. a pinned Node's `bin`. Read at server start: `server stop` first to change it |
 | `OPENCODE_DELEGATE_PASS_ENV` | Comma-separated extra variables to pass to the server. **Every name listed is copied into every OpenCode shell**, so never list secrets |
 
+## Built with itself
+
+Since 2.1.0, most code changes in this repo were written by OpenCode through this plugin: Claude
+wrote the brief, reviewed the diff and ran the tests; OpenCode made the edits. As of 2.1.2:
+37 delegated runs on the free default model, all finishing with changes and clean syntax (some
+after a second attempt with review feedback), median 65 s, $0. `delegate.py report` shows the
+same numbers for your own runs.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

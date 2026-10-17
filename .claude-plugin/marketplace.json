@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Delegate coding work to the OpenCode CLI (free models via OpenCode Zen) while Claude plans, writes the brief, supervises and reviews.",
-    "version": "2.1.1"
+    "version": "2.1.2"
   },
   "plugins": [
     {

@@ -10,7 +10,7 @@ description: >
   for delegation (opencode.json policy), choosing the OpenCode model, and reporting past runs.
 argument-hint: "<task description>"
 metadata:
-  version: 2.1.1
+  version: 2.1.2
 ---
 
 # OpenCode delegation
