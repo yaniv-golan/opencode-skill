@@ -1386,34 +1386,62 @@ def msg_pending(path):
     return out
 
 
-def msg_ack(path, ids):
+def _msg_ack_locked(path, ids):
     path = Path(path)
     ack = path.with_suffix(".acked")
+    fd = os.open(ack, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, "".join(f"{i}\n" for i in ids).encode())
+    finally:
+        os.close(fd)
+    acknowledged = {line.strip() for line in ack.read_text().splitlines() if line.strip()}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        lines = []
+    ids_in_file = []
+    for line in lines:
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(m, dict) and m.get("id"):
+            ids_in_file.append(m["id"])
+    if ids_in_file and all(i in acknowledged for i in ids_in_file):
+        ack.unlink()
+        path.unlink()
+
+
+def msg_ack(path, ids):
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = os.open(path.with_suffix(".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        fd = os.open(ack, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            os.write(fd, "".join(f"{i}\n" for i in ids).encode())
-        finally:
-            os.close(fd)
-        acknowledged = {line.strip() for line in ack.read_text().splitlines() if line.strip()}
-        try:
-            lines = path.read_text().splitlines()
-        except OSError:
-            lines = []
-        ids_in_file = []
-        for line in lines:
-            try:
-                m = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(m, dict) and m.get("id"):
-                ids_in_file.append(m["id"])
-        if ids_in_file and all(i in acknowledged for i in ids_in_file):
-            ack.unlink()
-            path.unlink()
+        _msg_ack_locked(path, ids)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
+
+
+def msg_claim(path, select, emit):
+    """Read, emit and ack in one step under the mailbox lock, so two consumers (parallel
+    PostToolUse hooks) can't both deliver the same message. `select` picks a prefix of the
+    pending messages; `emit` prints them. An emit that raises acks nothing."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = os.open(path.with_suffix(".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        pending = msg_pending(path)
+        if not pending:
+            return []
+        taken = select(pending)
+        if not taken:
+            return []
+        emit(taken)
+        _msg_ack_locked(path, [m["id"] for m in taken])
+        return taken
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         os.close(lock)
@@ -1651,10 +1679,7 @@ def cmd_inbox(args):
     path = msg_session_file(session)
     deadline = time.time() + args.timeout
     while True:
-        pending = msg_pending(path)
-        if pending:
-            msg_print(pending)
-            msg_ack(path, [m["id"] for m in pending])
+        if msg_claim(path, list, msg_print):
             return EXIT_OK
         if not args.wait:
             print("no messages")
@@ -1676,18 +1701,24 @@ def cmd_hook(args):
         session = data.get("session_id")
         event = data.get("hook_event_name")
         path = msg_session_file(session) if session else None
-        pending = msg_pending(path) if path else []
-        if not pending:
+        if not path or not Path(path).exists():
             return EXIT_OK
-        taken = []
-        for m in pending:
-            text = msg_format(taken + [m])
-            if taken and len(text) >= 9000:
-                break
-            taken.append(m)
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
-                                                 "additionalContext": msg_format(taken)}}))
-        msg_ack(path, [m["id"] for m in taken])
+
+        def select(pending):
+            taken = []
+            for m in pending:
+                text = msg_format(taken + [m])
+                if taken and len(text) >= 9000:
+                    break
+                taken.append(m)
+            return taken
+
+        def emit(taken):
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
+                                                     "additionalContext": msg_format(taken)}}))
+            sys.stdout.flush()
+
+        msg_claim(path, select, emit)
     except Exception:
         pass
     return EXIT_OK
