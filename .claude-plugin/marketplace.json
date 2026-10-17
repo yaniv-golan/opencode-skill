@@ -5,14 +5,14 @@
     "email": "yaniv@golan.name"
   },
   "metadata": {
-    "description": "Delegate coding work to the OpenCode CLI (free models such as DeepSeek V4.1 Flash via OpenCode Zen) while Claude plans, writes the brief, supervises and reviews.",
-    "version": "2.1.0"
+    "description": "Delegate coding work to the OpenCode CLI (free models via OpenCode Zen) while Claude plans, writes the brief, supervises and reviews.",
+    "version": "2.1.1"
   },
   "plugins": [
     {
       "name": "opencode-delegate",
       "source": "./opencode-delegate",
-      "description": "Delegate coding work to the OpenCode CLI (free models such as DeepSeek V4.1 Flash via OpenCode Zen) while Claude plans, writes the brief, supervises and reviews.",
+      "description": "Delegate coding work to the OpenCode CLI (free models via OpenCode Zen) while Claude plans, writes the brief, supervises and reviews.",
       "author": {
         "name": "Yaniv Golan",
         "email": "yaniv@golan.name"

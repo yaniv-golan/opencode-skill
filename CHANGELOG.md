@@ -3,15 +3,35 @@
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.1.1] - 2026-10-17
+
+### Fixed
+- The install instructions installed an unsupported OpenCode. Homebrew's plain `opencode` formula is
+  now OpenCode 2, which changed the server API, permissions and plugins this plugin relies on. The
+  README now installs OpenCode 1 (`brew install anomalyco/tap/opencode`, `npm install -g
+  opencode-ai`, or the install script), and the script refuses OpenCode 2 with those instructions,
+  both at start and when reusing a running server.
+- `land`'s exit code 4 (applied, commit failed, task kept) and its `--keep` and `--message-file`
+  options are documented in the skill.
+
+### Changed
+- The marketplace and skill descriptions no longer name a specific free model; `delegate.py models`
+  lists the current ones.
+- README: a first-screen safety summary, the plugin's hooks, `--unsafe-policy`, what the state dir
+  holds (including task briefs) on uninstall, and troubleshooting rows for OpenCode 2, the safety
+  plugin and an old git. CONTRIBUTING: a test recipe that avoids the macOS temp-dir hang, what CI
+  actually runs, and a link to the code of conduct. The bug template asks reporters not to paste
+  the server password, briefs or whole run logs.
+
 ## [2.1.0] - 2026-10-17
 
 ### Added
 - `run --from-working-tree`: start a new task from a snapshot of the main checkout's current files
   (uncommitted edits and untracked, non-ignored files), taken through a temporary index so the
   user's index, files and stash are untouched. Lists the untracked files it includes and refuses
-  secret-looking names unless `--allow-secret-files`. The snapshot task's commits live on the
-  private ref `refs/opencode-delegate/tasks/<task>` (detached worktree), not a branch, so
-  `git push --all` / `--branches` never publish the user's uncommitted files.
+  secret-looking names unless `--allow-secret-files`. When the snapshot differs from `HEAD`,
+  its commits live on the private ref `refs/opencode-delegate/tasks/<task>` (detached worktree), not
+  a branch, so `git push --all` / `--branches` never publish the user's uncommitted files.
 - `apply`: put a task's changes into the main checkout's working tree as unstaged edits, with
   `--check` (dry run), refusal on any conflict (exit 6, nothing changed), opt-in `--3way`, and
   detection of a task that was already applied.
@@ -168,6 +188,7 @@ and packaged as the `opencode-delegate` Claude Code plugin.
   Auto-delegation is now opted into per project, in that project's `CLAUDE.md`.
 - Estimated "manual completion" entries in the run log.
 
+[2.1.1]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/yaniv-golan/opencode-skill/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/yaniv-golan/opencode-skill/compare/v2.0.0...v2.0.1

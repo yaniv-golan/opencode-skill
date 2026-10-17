@@ -4,7 +4,11 @@ labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: For security problems, don't file an issue; see SECURITY.md.
+      value: |
+        For security problems, don't file an issue; see SECURITY.md.
+
+        Don't paste `server.json`, `OPENCODE_SERVER_PASSWORD`, task briefs, or whole run logs: they
+        hold the server password and your task text. Quote only the lines that show the problem.
   - type: textarea
     id: what
     attributes:
@@ -47,5 +51,5 @@ body:
   - type: dropdown
     id: dotopencode
     attributes:
-      label: Is there a .opencode/ directory in the repo or above it?
+      label: Is there a .opencode/ directory in the repo or in ~/.opencode?
       options: ["no", "yes", "don't know"]

@@ -16,8 +16,11 @@ There's no unit-test suite: changes are verified by smoke runs against a real Op
 Never test against your real state directory, port, or a project you care about:
 
 ```bash
-export OPENCODE_DELEGATE_HOME=$(mktemp -d) OPENCODE_DELEGATE_PORT=4098
+export OPENCODE_DELEGATE_HOME=$(mktemp -d /tmp/ocd-test.XXXXXX) OPENCODE_DELEGATE_PORT=4098
 ```
+
+Keep test state and throwaway repos out of macOS's per-user temp dir (`/var/folders/…`, where a bare
+`mktemp -d` lands): OpenCode 1.19.3 hangs at startup when its working directory is there.
 
 Use a throwaway git repo with a policy from `delegate.py init`. AGENTS.md → Testing lists what to
 re-check. To try the plugin from your clone in Claude Code, start a session with
@@ -25,7 +28,8 @@ re-check. To try the plugin from your clone in Claude Code, start a session with
 
 ## Validators
 
-Run before opening a pull request (CI runs the first three):
+Run before opening a pull request. CI runs the first two, plus version-consistency and JSON checks;
+`claude plugin validate` needs the `claude` CLI, so run it locally.
 
 ```bash
 python3 -m py_compile opencode-delegate/skills/opencode/scripts/delegate.py
@@ -44,6 +48,10 @@ python -m scripts.check_portability <clone>/opencode-delegate/skills/opencode --
 Version consistency across the five places is also checked by
 [skill-packager](https://github.com/yaniv-golan/skill-packager-skill)'s `validate`
 (`python3 -m skill_packager validate <clone>`, from its `scripts/` directory).
+
+## Conduct
+
+This project follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Pull requests
 

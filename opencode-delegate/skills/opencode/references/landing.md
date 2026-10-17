@@ -33,3 +33,7 @@ were neither applied nor merged. Task branches and refs are local working state:
 `git push --mirror` in a repo with snapshot tasks (it pushes every ref, including
 `refs/opencode-delegate/*`). `remove --delete-branch` deletes the branch or private ref too.
 
+`land` options: `--commit -m "<msg>"` or `--commit --message-file <file>` commits exactly the
+task's files; `--keep` keeps the worktree and branch after landing. `land` returns `apply`'s exit
+codes, plus 4 when the changes were applied but the commit failed: the changes are in the user's
+working tree and the task is kept, so don't land again.

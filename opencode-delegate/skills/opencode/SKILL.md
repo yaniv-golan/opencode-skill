@@ -1,7 +1,7 @@
 ---
 name: opencode
 description: >
-  Delegate coding work to the OpenCode CLI (free models such as DeepSeek V4.1 Flash via OpenCode Zen)
+  Delegate coding work to the OpenCode CLI (free models via OpenCode Zen)
   while Claude plans, writes the brief, supervises and reviews. Each task runs in its own git worktree
   and branch through one shared `opencode serve`, under a default-deny command policy, so several
   tasks can run in parallel without touching the user's checkout. Use when the user types
@@ -10,7 +10,7 @@ description: >
   for delegation (opencode.json policy), choosing the OpenCode model, and reporting past runs.
 argument-hint: "<task description>"
 metadata:
-  version: 2.1.0
+  version: 2.1.1
 ---
 
 # OpenCode delegation
@@ -222,7 +222,9 @@ merging `opencode/<slug>` (commit-based tasks only). Dry-run first:
     python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py apply --repo <repo> --task <slug> --check
     python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py land --repo <repo> --task <slug> [--commit -m "<msg>"]
 
-Exit codes of `apply`/`land`: 0 applied, 2 nothing to apply, 6 conflict (nothing changed). Rules:
+Exit codes of `apply`/`land`: 0 applied, 2 nothing to apply, 6 conflict (nothing changed); `land`
+also returns 4 when the changes were applied but the commit failed (the task is kept: don't land
+again, report it). Rules:
 - **Commit** (`--commit`) only when the user asked for a commit and approved the message.
 - **`--3way` or `remove --force`** only on the user's say-so.
 - **Never merge** a snapshot-based branch.
