@@ -40,7 +40,8 @@ assert:
   - skill_triggered: "opencode-delegate:opencode"
   - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\srun\s[\s\S]*--task\s+[a-z0-9]+(-[a-z0-9]+)*'}}
   - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\sinit\s'}}
-  - tool_result_matches: 'ocd-harness/[a-z0-9-]+/worktrees/[^/\s]+/[a-z0-9-]+'
+  # No worktree-path check: the redaction policy rewrites host paths, so it could never match on replay;
+  # the task branch (transcript_matches below) is the evidence instead.
   - tool_called: {tool: Bash, input: {command: 'delegate\.py[\s\S]*\sdiff\s'}}
   - tool_not_called: {tool: Bash, input: {command: 'git\s+push'}, scope: any}
   - tool_not_called: {tool: Bash, input: {command: '--unsafe-policy'}, scope: any}
