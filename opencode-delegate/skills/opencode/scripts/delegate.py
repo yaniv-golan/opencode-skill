@@ -22,8 +22,9 @@ Subcommands (all print plain text; exit codes below):
   report [--since DAYS] [--project NAME] [--fails]
   tell --repo R --task SLUG TEXT   queue a message for a task's OpenCode agent
   answer --repo R --task SLUG TEXT queue an answer for a task's OpenCode agent
-  inbox [--session ID] [--wait] [--timeout SECS] [--repo R]
-                                  show and acknowledge messages for this Claude session
+  inbox [--session ID]            show and acknowledge messages for this Claude session (one-shot)
+  wait --repo R [--task T ...] [--max SECS] [--stream] [--session ID]
+                                  wait for detached runs: print their messages and results
   agents [--repo R]               task worktrees: how many messages each has queued
   hook                            deliver this session's pending messages to a Claude Code hook
   pair --repo R --task A --with B   let two of the repo's tasks message each other
@@ -38,6 +39,7 @@ Exit codes for `run`:
   1 usage / setup error (nothing was delegated)
 Exit codes for `apply`: 0 applied (or --check clean), 2 nothing to apply, 6 conflicts (nothing changed)
 `land` returns apply's codes, plus 4 when applied but the commit failed (the task is kept)
+Exit codes for `wait`: 0 event(s) printed or nothing running, 1 usage, 8 still running at --max
 
 Environment:
   OPENCODE_DELEGATE_MODEL   default model (else opencode/deepseek-v4.1-flash-free)
@@ -78,6 +80,7 @@ DENIED_MARK = "prevents you from using this specific tool call"
 EXIT_OK, EXIT_USAGE, EXIT_NOTHING, EXIT_TIMEOUT, EXIT_ERROR, EXIT_SYNTAX = 0, 1, 2, 3, 4, 5
 EXIT_CONFLICT = 6
 EXIT_GATE = 7
+EXIT_STILL_RUNNING = 8
 TASKS = HOME / "tasks"
 MSG = HOME / "msg"
 MSG_MAX_BYTES = 4096
@@ -583,6 +586,62 @@ def save_meta(repo, slug, meta):
     p.write_text(json.dumps(meta, indent=2))
 
 
+OPENCODE_EXT_PATTERNS = ("agent/**/*.md", "agents/**/*.md",
+                         "command/**/*.md", "commands/**/*.md",
+                         "mode/*.md", "modes/*.md",
+                         "plugin/*.ts", "plugin/*.js", "plugins/*.ts", "plugins/*.js",
+                         "tool/*.js", "tool/*.ts", "tools/*.js", "tools/*.ts")
+
+
+def loadable_opencode(dirpath):
+    """Files/dirs under a .opencode dir that OpenCode's extension loader picks up, as sorted paths
+    relative to it. Loader patterns (verified on 1.19.3): {agent,agents}/**/*.md,
+    {command,commands}/**/*.md, {mode,modes}/*.md, {plugin,plugins}/*.{ts,js}, {skill,skills}/**/
+    (directories) and {tool,tools}/*.{js,ts}. An empty list means nothing loadable."""
+    dirpath = Path(dirpath)
+    if not dirpath.is_dir():
+        return []
+    found = set()
+    for pattern in OPENCODE_EXT_PATTERNS:
+        for p in dirpath.glob(pattern):
+            if p.is_file():
+                found.add(p)
+    for base in ("skill", "skills"):
+        for p in dirpath.glob(f"{base}/**/*"):
+            if p.is_dir():
+                found.add(p)
+    return sorted(str(p.relative_to(dirpath)) for p in found)
+
+
+def opencode_dir_hits(wt):
+    """{str(dir): [loadable paths]} for the worktree's and the user's ~/.opencode, for those that
+    hold loadable extensions (they load into the shared server outside the opencode.json policy)."""
+    hits = {}
+    for d in (Path(wt) / ".opencode", Path.home() / ".opencode"):
+        rel = loadable_opencode(d)
+        if rel:
+            hits[str(d)] = rel
+    return hits
+
+
+def opencode_dir_hash(hits):
+    """Stable content hash over the hits: each dir path, then each sorted relative path and, for a
+    file, its bytes (directories contribute the path only)."""
+    h = hashlib.sha256()
+    for d, rels in hits.items():
+        h.update(d.encode() + b"\0")
+        for rel in rels:
+            h.update(rel.encode() + b"\0")
+            p = Path(d) / rel
+            if not p.is_dir():
+                try:
+                    h.update(p.read_bytes())
+                except OSError:
+                    pass
+            h.update(b"\0")
+    return h.hexdigest()
+
+
 def snapshot_working_tree(repo, allow_secret_files):
     """Commit the main checkout's current state (tracked changes + untracked, non-ignored files)
     WITHOUT touching its index, working tree or stash: a temporary index file is used.
@@ -950,6 +1009,28 @@ def cmd_run(args):
     # so close the endpoint and drop the token file on any exit. close() is idempotent.
     atexit.register(cleanup_endpoint)
 
+    # Loadable .opencode extensions (worktree or ~/.opencode) load into the shared server outside
+    # the opencode.json policy. Refuse unless this task approved them before and they are unchanged.
+    opencode_hits = opencode_dir_hits(wt)
+    pre_opencode = opencode_hits.get(str(wt / ".opencode"), [])
+    if opencode_hits:
+        oh = opencode_dir_hash(opencode_hits)
+        if args.allow_opencode_dir:
+            meta["opencode_dir_ok"] = oh
+            save_meta(repo, args.task, meta)
+        elif meta.get("opencode_dir_ok") == oh:
+            pass
+        else:
+            lines = ["found loadable OpenCode extensions that would run in the shared server "
+                     "outside the policy:"]
+            for d, rels in opencode_hits.items():
+                lines.append(f"  {d}:")
+                lines.extend(f"    {r}" for r in rels)
+            lines.append("Review them; to proceed anyway pass --allow-opencode-dir "
+                         "(remembered for this task until they change).")
+            discard_if_new()
+            die("\n".join(lines))
+
     # The server caches each directory's config on first use; without this a
     # tightened allowlist is silently ignored (verified on 1.19.3).
     disposed_at = time.time()
@@ -1232,6 +1313,8 @@ def cmd_run(args):
         checks_passed = sum(1 for ok, _, _, _ in check_results if ok)
         checks_failed = len(check_results) - checks_passed
 
+        created_ext = [p for p in loadable_opencode(wt / ".opencode") if p not in pre_opencode]
+
         print()
         if timed_out:
             outcome, code = "timeout", EXIT_TIMEOUT
@@ -1243,7 +1326,7 @@ def cmd_run(args):
             outcome, code = "syntax_errors", EXIT_SYNTAX
         else:
             outcome, code = "ok", EXIT_OK
-        if outcome == "ok" and (checks_failed or out_of_scope):
+        if outcome == "ok" and (checks_failed or out_of_scope or created_ext):
             outcome, code = "gate_failed", EXIT_GATE
         print(f"=== OPENCODE {outcome.upper()} (opencode exit {rc}, {duration}s) ===")
         if commits:
@@ -1260,6 +1343,10 @@ def cmd_run(args):
             print(f"=== OUT OF SCOPE ({len(out_of_scope)}) ===")
             for f in out_of_scope:
                 print(f"  {f}")
+        if created_ext:
+            print("=== OPENCODE EXTENSIONS CREATED BY THIS RUN (the next run would load them) ===")
+            for p in created_ext:
+                print(f"  {p}")
         if checked:
             print(f"=== SYNTAX {'OK' if not syntax_errors else 'ERRORS'} ({checked} checked) ===")
             for e in syntax_errors:
@@ -2065,29 +2152,217 @@ def cmd_inbox(args):
     session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not session:
         die("no session id: pass --session or set CLAUDE_CODE_SESSION_ID")
-    path = msg_session_file(session)
-    start = time.time()
-    deadline = start + args.timeout
-    name = repo_root(Path(args.repo).resolve()).name if args.repo and args.wait else None
-    seen_live = False
+    if msg_claim(msg_session_file(session), list, msg_print):
+        return EXIT_OK
+    print("no messages")
+    return EXIT_NOTHING
+
+
+# ── wait ────────────────────────────────────────────────────────────────────
+
+def reported_path(session):
+    return MSG / "sessions" / f"{session}.reported"
+
+
+def reported_ids(path):
+    try:
+        return {line.strip() for line in Path(path).read_text().splitlines() if line.strip()}
+    except OSError:
+        return set()
+
+
+def mark_reported(path, run_id):
+    """Append a run_id to a session's reported marker under the msg_append-style lock, so two
+    `wait` calls (or a wait and a hook) never report the same run twice."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = os.open(str(path) + ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (run_id + "\n").encode())
+        finally:
+            os.close(fd)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
+
+
+def run_log_entries():
+    try:
+        lines = RUN_LOG.read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            out.append(entry)
+    return out
+
+
+def watched_tasks(repo, only):
+    if only:
+        return sorted(dict.fromkeys(only))
+    names = set()
+    wts = WORKTREES / repo.name
+    if wts.is_dir():
+        names.update(p.name for p in wts.glob("*") if (p / ".git").exists())
+    leases = LEASES / repo.name
+    if leases.is_dir():
+        names.update(p.stem for p in leases.glob("*.json"))
+    return sorted(names)
+
+
+def lease_run_id(repo_name, task):
+    try:
+        return json.loads(lease_path(repo_name, task).read_text()).get("run_id")
+    except (OSError, ValueError):
+        return None
+
+
+def log_excerpt(repo_name, task, run_id):
+    """The run log from its `=== OPENCODE ` banner to the end, or None if the log is gone."""
+    try:
+        text = (LOGS / repo_name / task / f"{run_id}.log").read_text()
+    except OSError:
+        return None
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("=== OPENCODE "):
+            return "\n".join(lines[i:])
+    return text
+
+
+def first_line(body):
+    for line in (body or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def entry_recent(entry, floor):
+    try:
+        when = datetime.fromisoformat(str(entry.get("ts")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    return when >= floor
+
+
+def cmd_wait(args):
+    """Wait for detached runs of a repo without a background shell. Claim this session's
+    messages (same atomic claim the hook uses) and report each finished or crashed run once,
+    marked in MSG/sessions/<session>.reported. Default mode returns on the first event;
+    --stream prints one line per event and runs until nothing is left."""
+    session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not session:
+        die("no session id: pass --session or set CLAUDE_CODE_SESSION_ID")
+    repo = repo_root(Path(args.repo).resolve())
+    msg_path = msg_session_file(session)
+    rep_path = reported_path(session)
+    started = datetime.now(timezone.utc)
+    floor = started - timedelta(seconds=args.since)
+    deadline = time.time() + (args.max if args.max is not None else (1800 if args.stream else 100))
+    tasks = watched_tasks(repo, args.task)
+    task_set = set(tasks)
+    seen_live = {}
+    stopped = {}
+
+    def emit(pending):
+        if args.stream:
+            for m in pending:
+                print(f"[{m.get('kind')}] {m.get('from')} {m.get('id')} {first_line(m.get('body'))}")
+        else:
+            print(msg_format(pending))
+        sys.stdout.flush()
+
     while True:
-        if msg_claim(path, list, msg_print):
+        printed = False
+        if msg_claim(msg_path, list, emit):
+            printed = True
+
+        live_now = {}
+        for task in tasks:
+            if lease_live(repo.name, task):
+                rid = lease_run_id(repo.name, task)
+                if rid:
+                    live_now[rid] = task
+        for rid, task in live_now.items():
+            seen_live[rid] = task
+            stopped.pop(rid, None)
+        now = time.time()
+        for rid in seen_live:
+            if rid not in live_now and rid not in stopped:
+                stopped[rid] = now
+
+        reported = reported_ids(rep_path)
+        entries = [e for e in run_log_entries() if e.get("project") == repo.name]
+        logged = {e.get("run_id") for e in entries if e.get("run_id")}
+
+        for e in entries:
+            rid = e.get("run_id")
+            if not rid or rid in reported:
+                continue
+            if args.task and e.get("task") not in task_set:
+                continue
+            if rid not in seen_live and not entry_recent(e, floor):
+                continue
+            task = e.get("task")
+            logp = LOGS / repo.name / task / f"{rid}.log"
+            if args.stream:
+                print(f"[done] {task} {e.get('outcome')} exit {e.get('exit_code')} log {logp}")
+            else:
+                print(f"=== DONE {repo.name}/{task} run {rid}: {e.get('outcome')} "
+                      f"(exit {e.get('exit_code')}) ===")
+                excerpt = log_excerpt(repo.name, task, rid)
+                if excerpt is not None:
+                    print(excerpt)
+                else:
+                    print(f"(no log at {logp}; model {e.get('model')}, session {e.get('session')}, "
+                          f"duration {e.get('duration_secs')}s, files changed {e.get('files_changed')})")
+            sys.stdout.flush()
+            mark_reported(rep_path, rid)
+            reported.add(rid)
+            printed = True
+
+        for rid, task in list(seen_live.items()):
+            if rid in reported or rid in logged or rid in live_now:
+                continue
+            if rid not in stopped or now - stopped[rid] < 5:
+                continue
+            aborted = []
+            try:
+                aborted = abort_busy_sessions(worktree_path(repo, task), _state())
+            except Exception as exc:
+                print(f"[WARN] could not abort sessions for {repo.name}/{task}: {exc}", flush=True)
+            if args.stream:
+                print(f"[crashed] {task} {rid}")
+            else:
+                print(f"=== CRASHED {repo.name}/{task} run {rid}: no result recorded; "
+                      f"aborted sessions: {', '.join(aborted)} ===")
+            sys.stdout.flush()
+            mark_reported(rep_path, rid)
+            reported.add(rid)
+            printed = True
+
+        unresolved = [rid for rid in seen_live if rid not in reported and rid not in logged]
+        if args.stream:
+            if not live_now and not unresolved and not msg_pending(msg_path):
+                return EXIT_OK
+        elif printed:
             return EXIT_OK
-        if not args.wait:
-            print("no messages")
-            return EXIT_NOTHING
-        if name:
-            live = any(lease_live(name, p.stem) for p in (LEASES / name).glob("*.json"))
-            if live:
-                seen_live = True
-            elif seen_live or time.time() - start >= 60:
-                if msg_claim(path, list, msg_print):
-                    return EXIT_OK
-                print(f"no task of {name} is running; no messages")
-                return EXIT_NOTHING
+        elif not live_now and not unresolved:
+            print(f"no task of {repo.name} is running")
+            return EXIT_OK
+
         if time.time() >= deadline:
-            print(f"no messages within {args.timeout}s")
-            return EXIT_NOTHING
+            still = sorted(set(live_now.values()))
+            print(f"still running: {', '.join(still)}")
+            return EXIT_STILL_RUNNING
         time.sleep(1)
 
 
@@ -2194,6 +2469,10 @@ def main():
                         "(uncommitted and untracked, non-ignored files) instead of HEAD; land with `apply`")
     r.add_argument("--allow-secret-files", action="store_true",
                    help="with --from-working-tree: include untracked files whose names look like secrets")
+    r.add_argument("--allow-opencode-dir", action="store_true",
+                   help="run even though the worktree or ~/.opencode holds loadable OpenCode "
+                        "extensions (plugins, tools, agents, commands, modes, skills); remembered "
+                        "for this task until they change")
     r.add_argument("--detach", action="store_true",
                    help="start the run in the background and return once it is live")
     r.add_argument("--_detached", action="store_true", help=argparse.SUPPRESS)
@@ -2225,9 +2504,17 @@ def main():
         p.add_argument("text", nargs="+")
     ib = sub.add_parser("inbox", help="show and acknowledge messages for this Claude session")
     ib.add_argument("--session")
-    ib.add_argument("--wait", action="store_true")
-    ib.add_argument("--timeout", type=int, default=1500)
-    ib.add_argument("--repo", help="with --wait: also stop when no task of this repo is running")
+    wa = sub.add_parser("wait", help="wait for detached runs and report their messages and results")
+    wa.add_argument("--repo", required=True)
+    wa.add_argument("--task", action="append", metavar="TASK",
+                    help="task to watch (repeatable; default: every task of the repo)")
+    wa.add_argument("--max", type=int, default=None,
+                    help="seconds to wait (default 100, or 1800 with --stream)")
+    wa.add_argument("--stream", action="store_true",
+                    help="print one line per event and keep going until nothing is running")
+    wa.add_argument("--session")
+    wa.add_argument("--since", type=int, default=300,
+                    help="also report runs that finished this many seconds before wait started (default 300)")
     ag = sub.add_parser("agents", help="task worktrees: queued message counts")
     ag.add_argument("--repo")
     pr = sub.add_parser("pair", help="let two task worktrees message each other")
@@ -2264,7 +2551,8 @@ def main():
     try:
         return {"init": cmd_init, "run": cmd_run, "diff": cmd_diff, "list": cmd_list, "apply": cmd_apply,
                 "remove": cmd_remove, "land": cmd_land, "report": cmd_report, "tell": cmd_tell,
-                "answer": cmd_answer, "inbox": cmd_inbox, "agents": cmd_agents, "pair": cmd_pair}[args.cmd](args)
+                "answer": cmd_answer, "inbox": cmd_inbox, "wait": cmd_wait, "agents": cmd_agents,
+                "pair": cmd_pair}[args.cmd](args)
     except _Interrupted as e:
         print(f"=== OPENCODE INTERRUPTED before the run started (signal {e}) ===", flush=True)
         return EXIT_ERROR
