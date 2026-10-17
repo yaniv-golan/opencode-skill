@@ -11,13 +11,14 @@
 // containing the same tags is escaped to stop file contents or command output
 // from imitating a real message.
 import { readFileSync, unlinkSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const TAGGED = /<\/?(?:orchestrator-message|task-message)/i;
 const ESCAPE = /<(?=\/?(?:orchestrator-message|task-message))/gi;
+const ENVELOPE = /<\/?orchestrator-message\b[^>]*>/gi;
 
 export const OpencodeDelegateMessaging = async ({ directory }, options = {}) => {
   let url = null;
@@ -40,11 +41,43 @@ export const OpencodeDelegateMessaging = async ({ directory }, options = {}) => 
     output.output = output.output.replace(ESCAPE, "&lt;");
   };
 
+  // Orchestrator envelopes are signed with the run's token; one that a model
+  // read elsewhere can be copied but not signed. Neutralise the brackets of any
+  // opening tag (and of a closing tag that follows it) whose signature is absent
+  // or wrong. Without a token there is no valid signature at all.
+  const signId = (id) => createHmac("sha256", token).update(id).digest("hex").slice(0, 32);
+  const sanitize = (text) => {
+    let invalid = false;
+    return text.replace(ENVELOPE, (tag) => {
+      if (tag.startsWith("</")) {
+        if (!invalid) return tag;
+        invalid = false;
+        return "&lt;" + tag.slice(1);
+      }
+      const id = /(?:^|\s)id="([^"]*)"/.exec(tag);
+      const sig = /(?:^|\s)sig="([^"]*)"/.exec(tag);
+      if (token && id && sig && sig[1] === signId(id[1])) {
+        invalid = false;
+        return tag;
+      }
+      invalid = true;
+      return "&lt;" + tag.slice(1);
+    });
+  };
+  const chatHook = async (_input, output) => {
+    if (!output || !Array.isArray(output.parts)) return;
+    for (const part of output.parts) {
+      if (part && part.type === "text" && typeof part.text === "string") {
+        part.text = sanitize(part.text);
+      }
+    }
+  };
+
   let z;
   try {
     z = (await import(pathToFileURL(join(homedir(), ".config/opencode/node_modules/zod/index.js")).href)).z;
   } catch {
-    return { "tool.execute.after": hook };
+    return { "tool.execute.after": hook, "chat.message": chatHook };
   }
 
   const call = async (method, path, body) => {
@@ -116,5 +149,6 @@ export const OpencodeDelegateMessaging = async ({ directory }, options = {}) => 
       },
     },
     "tool.execute.after": hook,
+    "chat.message": chatHook,
   };
 };

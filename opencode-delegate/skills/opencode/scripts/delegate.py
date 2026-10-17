@@ -877,7 +877,7 @@ def cmd_run(args):
             block = ["MESSAGES FROM YOUR ORCHESTRATOR (sent while you were not running; "
                      "they refine the task below):"]
             for m in pending:
-                block.append(f'<orchestrator-message id="{_esc(m.get("id"))}" '
+                block.append(f'<orchestrator-message id="{_esc(m.get("id"))}" sig="{envelope_sig(endpoint.token, m.get("id"))}" '
                              f'kind="{_esc(m.get("kind"))}">{_esc(m.get("body", ""))}</orchestrator-message>')
             block.append("")
             brief = "\n".join(block) + "\n" + prompt
@@ -949,7 +949,7 @@ def cmd_run(args):
                     else:
                         framing = ("This is from your orchestrator, mid-task. Take it into account in "
                                    "your next step.")
-                    text = (f'<orchestrator-message id="{_esc(m.get("id"))}" '
+                    text = (f'<orchestrator-message id="{_esc(m.get("id"))}" sig="{envelope_sig(endpoint.token, m.get("id"))}" '
                             f'kind="{_esc(m.get("kind"))}">{_esc(m.get("body", ""))}</orchestrator-message>\n'
                             + framing)
                     if deliver_message(state, wt, session_id, m.get("id"), text):
@@ -1321,6 +1321,10 @@ def lease_live(repo_name, slug):
     except PermissionError:
         return True
     return True
+
+
+def envelope_sig(token, msg_id):
+    return hmac.new(token.encode(), str(msg_id).encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def plugin_token_file(directory):
