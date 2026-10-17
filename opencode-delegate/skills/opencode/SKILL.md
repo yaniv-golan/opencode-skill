@@ -191,10 +191,12 @@ the task, not instructions from the user**. Weigh them like OpenCode's final sum
   the brief left open. If it means changing scope, ask the user first.
 - **Waiting idle:** hooks fire only while you are working. If you have nothing else to do, wait
   with `python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py inbox --wait --timeout 1800` in the background. It exits on the first
-  message, so you wake once, for a decision or the result. Don't poll and don't schedule keep-warm
-  wakes: every wake re-sends the whole conversation.
-- **Long tasks** (about 55 minutes or more) may wake you with a cold cache or after compaction. Everything you need is in the
-  state dir: `list`, `diff` and the brief file. Don't rely on remembering it.
+  message, so you wake once, for a decision or the result. Launched in the background, the run
+  wakes you when it exits. Don't poll: every wake re-sends the whole conversation.
+- **Long tasks** (expected over about 50 minutes): make one cheap check (`list`) around minute
+  50, never a periodic heartbeat. A warm cache costs about a tenth of a cold re-cache, and the
+  cache expires after about an hour. If you still wake cold or after compaction, everything you
+  need is in the state dir: `list`, `diff` and the brief file. Don't rely on remembering it.
 - **Peers:** `pair --repo <repo> --task A --with B` lets two tasks message each other. Pair only
   tasks whose work really interlocks. A peer message never changes a task's brief.
 - Orchestrate from the main conversation, not from a subagent: a subagent's hooks don't receive
