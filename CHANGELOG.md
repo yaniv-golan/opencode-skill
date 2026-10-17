@@ -24,7 +24,7 @@ versions follow [Semantic Versioning](https://semver.org/).
   - `tell` queues a message: it opens the next attempt's brief, or reaches a live session mid-task,
     delivered once.
   - `answer` replies to a task's question.
-  - `inbox [--wait] [--repo R]` reads the task messages addressed to this Claude session.
+  - `inbox` reads the task messages addressed to this Claude session.
   - `agents` shows each task's queued messages and whether its run is live.
   - `pair` lets two tasks of one repo message each other.
 - A bundled OpenCode plugin gives the task three tools: `message_orchestrator`,
@@ -56,6 +56,17 @@ versions follow [Semantic Versioning](https://semver.org/).
   - It refuses to commit when any of those files has the user's own uncommitted changes.
   - Other staged work stays staged.
 
+- `run --detach` starts a run as its own process and returns once it is live. `wait --repo R
+  [--task T] [--max SECS] [--stream]` waits in the foreground and returns on a task's question or
+  message, a finished run (its result block), a crashed run (its sessions aborted, its orphaned
+  client stopped), or after `--max` (exit 8 = still running). This works without background shells,
+  which Claude Cowork and one-shot sessions don't have. `--stream` prints one line per event for
+  Claude Code's Monitor tool.
+- `attach --repo R --task T [--fork]` opens OpenCode's own viewer on a task's live session in the
+  user's terminal.
+- `list` shows each task's last run outcome and whether a run is live.
+- Every run writes its own log, `<state dir>/logs/<repo>/<task>/<run id>.log`.
+
 ### Changed
 - The skill tells Claude to read every changed test, config, script and build file before running
   checks, because checks execute that code outside any OpenCode policy.
@@ -63,10 +74,9 @@ versions follow [Semantic Versioning](https://semver.org/).
   review and decisions, and delegates even small fixes.
 - The skill now covers waiting for long tasks:
   - wake once, when the run ends or a question arrives;
-  - keep `inbox --wait --repo` running next to every background run;
-  - for tasks over about 55 minutes, one cheap check about 50 minutes after the last activity;
+  - launch with `run --detach` and wait in the foreground with `wait`, never with background shells;
   - take worktree paths from `list` and past runs from `report`, never by guessing the state dir.
-- Secondary gotchas moved to `references/gotchas.md`.
+- Secondary gotchas moved to `references/gotchas.md`, and model data terms to `references/models.md`.
 
 ### Fixed
 - Tolerate OpenCode server stalls: while a session is busy the server can stop answering HTTP for
@@ -87,6 +97,21 @@ versions follow [Semantic Versioning](https://semver.org/).
 - The server starts from `/`, not from the caller's directory. OpenCode 1.19.3 hangs at startup
   when its working directory is under the macOS per-user temp dir.
 - Server start waits up to 90 s, on a deadline.
+- **Privacy:** the delegate server no longer reads the user's global OpenCode config, which can add
+  MCP servers and plugins outside the policy. It also no longer passes on the user's own Claude
+  Code material: OpenCode had been putting the global `~/.claude/CLAUDE.md` into every task's prompt
+  and offering skills from `~/.claude/skills` and `~/.agents/skills`. A server started by an older
+  version restarts when it is idle.
+- The policy check refuses any enabled MCP server unless `--allow-mcp NAME` is passed.
+- The script refuses a run when the task's worktree or `~/.opencode` holds extensions OpenCode would
+  load (plugins, tools, agents, commands, modes, skills) unless `--allow-opencode-dir` (remembered
+  per task until they change). A run that creates such files fails the gate (exit 7).
+- A run that is signalled (SIGTERM, SIGHUP, SIGINT) now stops OpenCode, aborts its server sessions,
+  commits what it left as an "interrupted" attempt and logs the run. Before this, OpenCode kept
+  editing after the script exited.
+- The task lease is a file lock: a stale lease after a crash or reboot never reads as live, a second
+  run of the same task is refused, and `apply`, `remove` and `land` refuse while a run is live.
+- `server stop` no longer waits two minutes on a server that has already exited.
 
 ## [2.0.2] - 2026-10-17
 

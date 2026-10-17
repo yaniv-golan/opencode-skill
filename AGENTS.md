@@ -73,7 +73,7 @@ was verified against a real OpenCode server.
 - Python 3.9+ standard library only. No third-party packages, no shell-outs to GNU-only tools
   (`timeout`, GNU `date`, `sed -i` without a suffix). It must run on stock macOS and Linux.
 - Keep the CLI non-interactive with structured plain-text output. The documented exit codes
-  (0 ok, 1 refused, 2 wrote nothing, 3 timeout, 4 error, 5 syntax, 6 apply conflict, 7 a `--check` failed or a file outside `--only` changed) are a contract that `SKILL.md`
+  (0 ok, 1 refused, 2 wrote nothing, 3 timeout, 4 error, 5 syntax, 6 apply conflict, 7 a `--check` failed or a file outside `--only` changed, 8 `wait`: still running) are a contract that `SKILL.md`
   depends on. Change both together, or not at all.
 - Keep it one file. A second script needs a reason the first can't absorb.
 - Pass prompts and paths as argv lists, never through a shell. `--setup` and `--check` are the
@@ -132,8 +132,14 @@ always re-check:
   out-of-scope change → exit 7); both reused by the next attempt of the same task
 - `land`: refuses `--commit` when a task file has the user's own changes (file untouched),
   commits only the task's files, leaves other staged work staged, removes the task
+- `run --detach` returns once live; `wait` reports the result once, a question, a run that ended
+  before `wait` started, and a SIGKILLed broker as CRASHED (sessions aborted, client stopped);
+  SIGTERM to a run → interrupted attempt, 0 active sessions; a second run of a live task refused
+- isolation: a fresh server's effective config has no `mcp` from the user's global config; a
+  task cannot see the global ~/.claude/CLAUDE.md or Claude skills, but sees the repo's AGENTS.md;
+  a loadable `.opencode/` plugin refuses without `--allow-opencode-dir`
 - messaging: `tell` before a run (in the brief) and during one (delivered once); `ask_orchestrator`
-  → `inbox --wait` → `answer` → tool result; `inbox --wait --repo` exits when the run ends; a
+  → `wait` returns it → `answer` → tool result; a
   forged or unsigned envelope is neutralised; parallel `hook` calls deliver each message once;
   `pair` lets a peer message arrive as a `<peer-message>`, and an unpaired send is refused
 

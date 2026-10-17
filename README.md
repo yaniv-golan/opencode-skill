@@ -104,9 +104,15 @@ Read this before using it on code you care about.
   basics), not your shell's. Secrets such as API keys don't reach them unless you pass them with
   `OPENCODE_DELEGATE_PASS_ENV`. The server password is blanked inside OpenCode's shells, but it's
   stored in `~/.local/state/opencode-delegate/server.json`, which any process running as you can read.
-- **Repo-supplied OpenCode config:** a `.opencode/` directory in the repo or any folder above it is
-  loaded into the shared server, outside the policy. Claude stops and asks before delegating in such
-  a repo; the script doesn't check this yet.
+- **Repo-supplied OpenCode extensions:** OpenCode loads plugins, tools, agents, commands, modes and
+  skills from a `.opencode/` folder in the task's worktree and from `~/.opencode`, into the shared
+  server and outside the policy. The script refuses such a run until you approve those files
+  (`--allow-opencode-dir`, remembered until they change), and refuses any enabled MCP server
+  unless you allow it by name (`--allow-mcp`).
+- **What the server doesn't load from your machine:** your global OpenCode config, which can add MCP
+  servers and plugins, and your own Claude Code material: the global `~/.claude/CLAUDE.md` and
+  your skills. OpenCode would otherwise read them into every delegated task. The repo's own
+  `AGENTS.md` still applies.
 - **Uncommitted work:** a snapshot task copies your uncommitted and untracked (non-ignored) files into
   its worktree. Secret-looking untracked names (`.env*`, keys, certificates, credential files) are
   refused unless you allow them. Its commits live on a private ref, so `git push --all` won't publish
@@ -135,15 +141,16 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `database is locked` | You ran `opencode run` directly in parallel; go through `delegate.py`, which shares one server |
 | `apply` exits 6 | Your files changed where OpenCode's did. Nothing was touched; re-run the task from your current state |
 | `run` exits 7 | A `--check` failed, or OpenCode changed a file outside `--only`; the run output lists which |
-| Claude asks about a `.opencode/` directory | It loads into the server outside the policy; remove or review it before delegating |
+| "found loadable OpenCode extensions" | The repo (or `~/.opencode`) ships OpenCode plugins/tools/agents; review them, then pass `--allow-opencode-dir` |
+| "MCP server … is enabled" | Disable it in `opencode.json`, or pass `--allow-mcp <name>` if you trust it |
 
 ## Advanced: using `delegate.py` directly
 
 Claude normally runs the script for you. To run it yourself, find it with
 `find ~/.claude/plugins -path '*opencode-delegate/skills/opencode/scripts/delegate.py'`.
 Subcommands (`delegate.py --help` for details): `server start|stop|status`, `models`, `init`, `run`,
-`diff`, `apply`, `land`, `list`, `remove`, `report`, and for messaging `tell`, `answer`, `inbox`,
-`agents`, `pair` (`hook` is called by the plugin's Claude Code hooks).
+`diff`, `apply`, `land`, `list`, `remove`, `report`, `wait`, `attach`, and for messaging `tell`,
+`answer`, `inbox`, `agents`, `pair` (`hook` is called by the plugin's Claude Code hooks).
 
 ### The policy `init` writes
 
