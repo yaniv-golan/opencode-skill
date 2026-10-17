@@ -114,6 +114,16 @@ def server_env():
            if k in SERVER_ENV_KEEP or k in passthrough or k.startswith("LC_")
            or (k.startswith("OPENCODE_") and not k.startswith("OPENCODE_DELEGATE_")
                and k != "OPENCODE_SERVER_PASSWORD")}
+    # The server must not read the user's global OpenCode config: it can add MCP servers,
+    # plugins and providers whose tools run outside the opencode.json policy. OPENCODE_CONFIG
+    # and OPENCODE_CONFIG_DIR point the server at extra config files, so they are dropped too;
+    # OPENCODE_CONFIG_CONTENT is kept because server_plugin_config merges our plugins into it.
+    env.pop("OPENCODE_CONFIG", None)
+    env.pop("OPENCODE_CONFIG_DIR", None)
+    cfg_home = HOME / "xdg-config"
+    cfg_home.mkdir(parents=True, exist_ok=True)
+    os.chmod(cfg_home, 0o700)
+    env["XDG_CONFIG_HOME"] = str(cfg_home)
     return toolchain_env(env)
 
 
@@ -285,7 +295,7 @@ def server_start(quiet=False):
                             stdout=log, stderr=log, stdin=subprocess.DEVNULL, env=env,
                             cwd="/", start_new_session=True)
     state = {"pid": proc.pid, "port": PORT, "password": password, "node": node_version(env),
-             "scrub_plugin": plugins_sha256(),
+             "scrub_plugin": plugins_sha256(), "isolated_config": True,
              "path_prepend": os.environ.get("OPENCODE_DELEGATE_PATH_PREPEND", ""),
              "started": datetime.now(timezone.utc).isoformat()}
     deadline = time.monotonic() + 90
@@ -424,7 +434,7 @@ def _is_deny(value):
     return isinstance(value, dict) and value.get("*") == "deny"
 
 
-def check_policy(path):
+def check_policy(path, allow_mcp=()):
     """Return a list of problems with the opencode.json at path ([] = safe)."""
     try:
         cfg = json.loads(Path(path).read_text())
@@ -432,10 +442,10 @@ def check_policy(path):
         return [f"{path.name} missing"]
     except ValueError as e:
         return [f"{path.name} is not plain JSON ({e}); comments/JSONC cannot be verified"]
-    return check_config(cfg)
+    return check_config(cfg, allow_mcp)
 
 
-def check_config(cfg):
+def check_config(cfg, allow_mcp=()):
     """Problems with a config dict: a file, or the merged config the server reports."""
     if cfg.get("permissions"):
         # 1.19 schema marks `permission` deprecated in favour of an ordered
@@ -454,6 +464,14 @@ def check_config(cfg):
                  ("*", "sh", "bash", "zsh", "eval", "env", "xargs", "sudo", "curl", "wget", "rm")]
         if risky:
             problems.append(f"allowlist contains shell/network/destructive entries: {risky}")
+    for name, entry in (cfg.get("mcp") or {}).items():
+        if isinstance(entry, dict) and entry.get("enabled") is False:
+            continue
+        if name in allow_mcp:
+            continue
+        problems.append(f'MCP server "{name}" is enabled; its tools run outside the opencode.json '
+                        f'policy. Disable it ("mcp": {{"{name}": {{"enabled": false}}}}) or pass '
+                        f'--allow-mcp {name}')
     return problems
 
 
@@ -891,13 +909,14 @@ def cmd_run(args):
     with server_lock():
         state = server_start(quiet=True)
         want = plugins_sha256()
-        if state.get("scrub_plugin") != want:
+        if state.get("scrub_plugin") != want or not state.get("isolated_config"):
             busy = [k for k, v in (api("GET", "/session/status", state) or {}).items()
                     if (v or {}).get("type") != "idle"]
             if busy:
-                die("the running server was started without the current safety plugin and has "
-                    f"{len(busy)} active session(s); wait for them, then `server stop` and retry")
-            print("[setup] restarting the server to load the current safety plugin")
+                die("the running server was started without the current safety plugin or config "
+                    f"isolation and has {len(busy)} active session(s); wait for them, then "
+                    "`server stop` and retry")
+            print("[setup] restarting the server to load the current safety plugin and config isolation")
             server_stop()
             state = server_start(quiet=True)
         models = {m[0]: m for m in list_models(state)}
@@ -921,7 +940,7 @@ def cmd_run(args):
     created, wt = False, None
     # Check before creating anything, so a refusal leaves no worktree behind.
     if not worktree_path(repo, args.task).exists():
-        problems = check_policy(repo / POLICY_FILE)
+        problems = check_policy(repo / POLICY_FILE, args.allow_mcp)
         if problems and not args.unsafe_policy:
             refuse(problems, repo)
     base_ref, kind, snap_untracked = args.base or "HEAD", "head", []
@@ -959,7 +978,7 @@ def cmd_run(args):
     elif (repo / POLICY_FILE).exists() and policy.read_bytes() != (repo / POLICY_FILE).read_bytes():
         print(f"[WARN] {POLICY_FILE} in the worktree differs from {repo / POLICY_FILE}; "
               f"the worktree's copy is the one enforced")
-    problems = check_policy(policy)
+    problems = check_policy(policy, args.allow_mcp)
     if problems and not args.unsafe_policy:
         refuse(problems, wt)
     for w in policy_warnings(policy):
@@ -1043,7 +1062,7 @@ def cmd_run(args):
     # after the cache reset), not just the file.
     try:
         effective = api("GET", f"/config?directory={urllib.request.quote(str(wt))}", state) or {}
-        problems = check_config(effective)
+        problems = check_config(effective, args.allow_mcp)
     except Exception as e:
         problems = [f"could not read the effective config from the server: {e}"]
     if problems and not args.unsafe_policy:
@@ -2533,6 +2552,8 @@ def main():
     r.add_argument("--setup", help="shell command run by this script (not OpenCode) in a NEW worktree, "
                                    "e.g. 'pnpm install --frozen-lockfile --offline'")
     r.add_argument("--unsafe-policy", action="store_true", help="delegate even if the policy check fails")
+    r.add_argument("--allow-mcp", action="append", metavar="NAME", default=[],
+                   help="allow this enabled MCP server despite the policy check (repeatable)")
     r.add_argument("--check", action="append", metavar="CMD",
                    help="shell command this script runs in the worktree after OpenCode finishes "
                         "(repeatable); a failure fails the run")
