@@ -17,8 +17,10 @@ metadata:
 
 Claude is the orchestrator: understand the request, split it into atomic tasks, write a
 self-contained brief per task, launch OpenCode, watch it, review the diff, run the project's real
-checks, and report. OpenCode does the editing. Its tokens are free; yours are not, so spend yours on
-the brief and the review, not on re-doing its work.
+checks, and report. OpenCode does the editing. Its tokens are free; yours are not, and your output
+tokens (including thinking) cost far more than your input. So **read, don't write**: reading a diff,
+a run log or a test result is cheap input; writing code, long briefs or long reports is expensive
+output. Spend output on short, exact briefs and decisions, not on re-doing OpenCode's work.
 
 **Running this skill's scripts.** Use the absolute path this file was loaded with:
 
@@ -77,7 +79,7 @@ script copies the uncommitted file into each new worktree.
 
 | Situation | Action |
 |---|---|
-| One obvious edit, location known, ≤ ~10 lines | Do it yourself; a delegation round-trip costs minutes |
+| One obvious edit, location known, ≤ ~10 lines | Still cheaper to delegate (a one-line `tell`); do it yourself only when waiting minutes would block other work |
 | Non-trivial logic in 1–3 files, one goal | One delegation |
 | More than 3 files, several steps, or a migration | Split into atomic tasks; delegate each |
 | Independent tasks (different files/concerns) | Separate `--task` slugs, run in parallel |
@@ -106,7 +108,8 @@ Run each command on its own (no `&&`, `;` or pipes). Do not commit.
 Make the edits now; do not just describe them.
 ```
 
-One objective per brief. Name the files. Give a VERIFY step OpenCode can actually run under the
+Keep briefs dense: exact names, signatures, exit codes and safety rules; point at the file for
+style ("follow `cmd_run`") instead of restating it. One objective per brief. Name the files. Give a VERIFY step OpenCode can actually run under the
 policy: an allowlisted command, or OpenCode's own grep/read tools, which the policy allows. Shell
 `grep`, `cat` or `echo` are denied unless allowlisted, and a denied command wastes turns. Write long briefs to a file
 and pass `--prompt-file`.
@@ -165,10 +168,16 @@ checks distinctly.
 
 ## Step 6 — Iterate (max 3 attempts per task)
 
-Re-run with the same `--task` and a brief that names what is wrong with the current diff ("the
-current diff does X; change it to Y; keep Z"). Don't restate the whole task — the worktree already
-has the partial work. After 3 failed attempts, stop and ask the user. If OpenCode got most of the
-way, finishing a small remainder yourself is fine — say so in the report.
+Send fixes back to OpenCode instead of making them yourself:
+
+    python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py tell --repo <repo> --task <slug> "the current diff does X; change it to Y; keep Z"
+    python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py run --repo <repo> --task <slug> --prompt "Apply your orchestrator's message above. <VERIFY step>"
+
+The queued message opens the next attempt's brief, which builds on the committed previous attempt;
+don't restate the whole task. While a run is live, `tell` reaches the session mid-task instead.
+Have OpenCode write any test or smoke script the change needs, in the worktree; you review and run
+it. After 3 failed attempts, stop and ask the user. Finish a remainder yourself only when it is
+tiny and waiting would block other work; say so in the report.
 
 ## Step 7 — Land it (the user decides)
 
