@@ -135,6 +135,8 @@ always re-check:
 - `run --detach` returns once live; `wait` reports the result once, a question, a run that ended
   before `wait` started, and a SIGKILLed broker as CRASHED (sessions aborted, client stopped);
   SIGTERM to a run → interrupted attempt, 0 active sessions; a second run of a live task refused
+- server lock: while a run is live, `server stop` and a run that needs a server restart are refused
+  (exit 1); both succeed once it ends or is SIGKILLed; `server stop --force` still stops it
 - isolation: a fresh server's effective config has no `mcp` from the user's global config; a
   task cannot see the global ~/.claude/CLAUDE.md or Claude skills, but sees the repo's AGENTS.md;
   a loadable `.opencode/` plugin refuses without `--allow-opencode-dir`
