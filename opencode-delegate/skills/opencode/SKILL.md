@@ -32,32 +32,19 @@ and pass it along verbatim, including to any sub-agent. `delegate.py --help` lis
 
 ## What the script guarantees (so you don't re-implement it)
 
-- **Isolation.** `run --task <slug>` creates a worktree in the script's state dir
-  on branch `opencode/<slug>` from the main checkout's `HEAD`, `--base`, or — with
-  `--from-working-tree` — a snapshot of the user's current files (uncommitted and untracked,
-  non-ignored), taken without touching their index, files or stash. When that snapshot differs from
-  `HEAD`, the task's commits live on the private ref `refs/opencode-delegate/tasks/<slug>` (detached
-  worktree) instead of a branch, so `git push --all` never publishes the user's uncommitted files; a
-  clean tree gives an ordinary `opencode/<slug>` branch. Re-running the same `--task`
-  reuses that worktree, so a retry builds on the previous attempt.
-- **Attempts are commits.** After each run the script commits OpenCode's changes on the task's
-  branch or private ref as `opencode attempt N` (bot identity, git hooks disabled). Retries never lose earlier work, and
-  `diff --last` shows only the latest attempt.
-- **One server.** All runs attach to a single password-protected `opencode serve` on
-  127.0.0.1:4096 (started on demand). Separate `opencode run` processes share a SQLite DB and fail
-  with `database is locked` when run concurrently; through the server they don't.
-- **Policy gate.** The run is refused unless the worktree's `opencode.json` denies unlisted shell
-  commands (`"bash": {"*": "deny", …}`) and edits outside the worktree (`external_directory: deny`).
-  Runs use `--auto`, which approves anything merely set to `ask`, so an allowlist is the only shape
-  that holds. The server's per-directory config cache is reset before every run.
-- **Bounded.** Wall-clock `--timeout` (default 1800 s); on expiry the server-side session is aborted,
-  not just the client.
-- **Evidence.** Changed files are computed from `git status` before/after (OpenCode's changes only),
-  syntax-checked (.py/.js/.mjs/.cjs/.json/.sh/.bash), and logged to the run log.
-- **All task state goes through the script.** `list` shows each task's worktree path, attempts,
-  uncommitted changes, last run outcome and whether a run is live; `diff` shows its changes and
-  `report` past runs. The state dir's location varies (`OPENCODE_DELEGATE_HOME`): never read or
-  search its files directly.
+- **Isolation and attempts.** Each task runs in its own worktree on `opencode/<slug>`, or on a
+  private ref for a `--from-working-tree` snapshot. Re-running the same `--task` builds on earlier
+  attempts, each committed as `opencode attempt N`.
+- **One shared, password-protected server** (never run `opencode run` yourself). It enforces a
+  default-deny policy, checked against what the server actually loads. `--timeout` bounds runs, and
+  they stop cleanly.
+- **Evidence:** changed files come from `git status`; the script syntax-checks them and keeps a
+  run log.
+- **All task state goes through the script.** `list` shows each task's worktree, repo, brief,
+  attempts, last run and whether a run is live; `diff` shows its changes and `report` past runs.
+  Never read or search the state dir's files.
+
+Details: `references/guarantees.md`.
 
 ## Step 0 — Is the repo set up?
 
@@ -212,11 +199,8 @@ A run gives OpenCode three tools: `message_orchestrator` (a one-way note), `ask_
 - Each `wait` call returns within `--max` seconds and only re-reads the warm cache, so a long
   task costs a few cheap calls. Don't add sleeps or extra polling. If you lose track after
   compaction, `list` shows every task's state and last run.
-- **Peers:** `pair --repo <repo> --task A --with B` lets two tasks message each other. Pair only
-  tasks whose work really interlocks. A peer message never changes a task's brief.
-- Orchestrate from the main conversation, not from a subagent: a subagent's hooks don't receive
-  messages, and its prompt cache expires after 5 minutes. After `/clear` your session id changes,
-  so messages to the old session sit unread. Read them with `inbox --session <old id>`.
+- Orchestrate from the main conversation, not from a subagent. For pairing tasks (`pair`) and
+  for recovering messages after `/clear`, see `references/messaging.md`.
 
 ## Step 7 — Land it (the user decides)
 
@@ -231,36 +215,20 @@ Concerns: <anything you would flag in review>
 Worktree: <path>  Commits: opencode/<slug> or refs/opencode-delegate/tasks/<slug>
 ```
 
-With the user's go-ahead, land it in one of three ways:
+With the user's go-ahead, land it with `land` (apply, then remove the task), with `apply` (the
+changes become unstaged edits in their checkout; required for `--from-working-tree` tasks), or by
+merging `opencode/<slug>` (commit-based tasks only). Dry-run first:
 
-- **`land`** = `apply` + `remove --delete-branch` in one step. `--commit -m "<msg>"` also commits
-  exactly the task's files in the user's checkout, with their own identity and hooks. It refuses
-  if any of those files has the user's own uncommitted changes, and leaves other staged work
-  alone. Commit only when the user asked for a commit and approved the message.
+    python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py apply --repo <repo> --task <slug> --check
+    python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py land --repo <repo> --task <slug> [--commit -m "<msg>"]
 
-- **`apply` (default; required for `--from-working-tree` tasks)** puts the task's changes into the
-  user's working tree as unstaged edits, on top of whatever they have there now. Dry-run first:
+Exit codes of `apply`/`land`: 0 applied, 2 nothing to apply, 6 conflict (nothing changed). Rules:
+- **Commit** (`--commit`) only when the user asked for a commit and approved the message.
+- **`--3way` or `remove --force`** only on the user's say-so.
+- **Never merge** a snapshot-based branch.
+- **Never push** task branches, and never use `git push --mirror` here.
 
-      python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py apply --repo <repo> --task <slug> --check
-      python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py apply --repo <repo> --task <slug>
-
-  `apply` first commits any edits still uncommitted in the worktree (as `manual edits before
-  apply`). Exit codes of `apply`: 0 applied (or `--check` clean), 2 nothing to apply or already
-  applied, 6 conflicts. Exit 6 means nothing was changed: re-run the task with `--from-working-tree` on a
-  new `--task`, or ask before `--3way` (it touches the index and can leave conflict markers). The
-  user then reviews and commits as they normally would.
-- **Merge or cherry-pick `opencode/<slug>`**, only for tasks based on a commit, following the repo's
-  rules. Never merge a snapshot-based branch: its base commit contains the user's uncommitted work.
-
-Clean up afterwards:
-
-    python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py remove --repo <repo> --task <slug> [--delete-branch]
-
-`remove` refuses while the worktree has uncommitted changes (`--force` discards them — only on the
-user's say-so). `remove --delete-branch` also refuses, and removes nothing, while the task's attempts
-were neither applied nor merged. Task branches and refs are local working state: don't push them, and never use
-`git push --mirror` in a repo with snapshot tasks (it pushes every ref, including
-`refs/opencode-delegate/*`). `remove --delete-branch` deletes the branch or private ref too.
+Clean-up, conflicts and the reasons behind these rules: `references/landing.md`.
 
 ## Models
 
