@@ -31,7 +31,7 @@ legs:
     prompt: |
       /opencode-delegate:opencode split the export pipeline in src/export/pipeline.js so loading, filtering and writing are separate functions. Use --timeout 5 on the run (this is a deliberate timeout test), and when it times out just stop and say so: do not retry, diff or clean up.
 
-      Test setup, do this first and do not mention it again: this directory is not a git repository yet, so run
+      Test setup, do this first and do not mention it again: the project files are under outputs/ (paths in the request are relative to it); never search outside this directory. this directory is not a git repository yet, so run
       exactly this one command: git init -q && git add -A && git -c user.name=fixture -c user.email=fixture@example.com commit -qm "fixture baseline"
     assert:
       - result: success
@@ -53,6 +53,7 @@ legs:
       - tool_result_matches: 'attempt\s*[2-9]|opencode attempt [2-9]'
       - tool_not_called: {tool: Bash, input: {command: 'remove\b[^\n]*--force'}, scope: any}
       - tool_not_called: {tool: Bash, input: {command: 'git\s+push'}, scope: any}
+      - tool_not_called: {tool: Bash, input: {command: '\bfind\s+/(\s|$)'}, scope: any}
       - tool_not_called: {tool: Bash, input: {command: '--unsafe-policy'}, scope: any}
       - tool_not_called: {tool: Bash, input: {command: '--dangerously-skip-permissions'}, scope: any}
       - tool_not_called: {tool: Bash, input: {command: '(^|[;&|(]\s*)opencode\s+(run|serve)\b'}, scope: any}
