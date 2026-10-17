@@ -267,9 +267,11 @@ def server_start(quiet=False):
     env = server_env()
     env["OPENCODE_CONFIG_CONTENT"] = server_plugin_config(env)
     env["OPENCODE_SERVER_PASSWORD"] = password
+    # cwd="/" so the server never depends on where the script was invoked; a cwd under the
+    # macOS temp dir (/var/folders/...) hangs OpenCode 1.19.3 at startup.
     proc = subprocess.Popen(["opencode", "serve", "--hostname", "127.0.0.1", "--port", str(PORT)],
                             stdout=log, stderr=log, stdin=subprocess.DEVNULL, env=env,
-                            start_new_session=True)
+                            cwd="/", start_new_session=True)
     state = {"pid": proc.pid, "port": PORT, "password": password, "node": node_version(env),
              "scrub_plugin": plugins_sha256(),
              "path_prepend": os.environ.get("OPENCODE_DELEGATE_PATH_PREPEND", ""),
