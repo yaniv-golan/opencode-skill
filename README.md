@@ -30,6 +30,7 @@ rewritten:
 | Changed files by mtime over the whole tree | `git status` before/after, OpenCode's changes only |
 | Auto-mode via a rule appended to global `~/.claude/CLAUDE.md` | Opt-in per project, in that project's `CLAUDE.md` |
 | Hard-coded, now-retired default model | A free default model, checked against the live model list |
+| Fire and forget | Claude and a running task message each other; the script runs your checks and flags changes outside the task's files |
 
 ## Requirements
 
@@ -78,6 +79,9 @@ Or ask Claude to "have OpenCode do it". What happens next:
 4. **Nothing lands until you say so.** The result waits in its worktree until you ask Claude to
    apply or merge it.
 
+While a task runs, Claude can correct it mid-task, and OpenCode can stop and ask Claude a question.
+Claude answers only what the brief left open, and asks you before changing the scope.
+
 If the task depends on your uncommitted work, say so: Claude starts it from a snapshot of your
 current files, and later puts the changes into your working tree as unstaged edits (or reports a
 conflict and changes nothing).
@@ -110,6 +114,15 @@ Read this before using it on code you care about.
 - **Model data terms:** free models are offered for a limited time, and some log or train on what you
   send. Check [OpenCode Zen](https://opencode.ai/zen) before using one on private code.
 
+- **Messages between Claude and a task** travel through a localhost endpoint that only that run
+  can reach (a one-time token), at most 5 per run of up to 4 KB each. They are signed, and the
+  task's plugin neutralises forged ones, for example text in a file that imitates a message.
+  Claude treats a task's message as data to review, never as an instruction from you.
+- **Checks and landing:** checks you ask the script to run (`--check`) run code OpenCode may have
+  edited, so they get the same minimal environment as OpenCode's shells. `land --commit` commits
+  only the task's files, as you, with your git hooks, and refuses if you have your own
+  uncommitted changes in those files.
+
 To report a security problem, see [SECURITY.md](SECURITY.md).
 
 ## Troubleshooting
@@ -121,6 +134,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | "repo pins Node … but the server's shell has …" | `delegate.py server stop`, then start a run with `OPENCODE_DELEGATE_PATH_PREPEND=<pinned node bin dir>` set |
 | `database is locked` | You ran `opencode run` directly in parallel; go through `delegate.py`, which shares one server |
 | `apply` exits 6 | Your files changed where OpenCode's did. Nothing was touched; re-run the task from your current state |
+| `run` exits 7 | A `--check` failed, or OpenCode changed a file outside `--only`; the run output lists which |
 | Claude asks about a `.opencode/` directory | It loads into the server outside the policy; remove or review it before delegating |
 
 ## Advanced: using `delegate.py` directly
@@ -128,7 +142,8 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 Claude normally runs the script for you. To run it yourself, find it with
 `find ~/.claude/plugins -path '*opencode-delegate/skills/opencode/scripts/delegate.py'`.
 Subcommands (`delegate.py --help` for details): `server start|stop|status`, `models`, `init`, `run`,
-`diff`, `apply`, `list`, `remove`, `report`.
+`diff`, `apply`, `land`, `list`, `remove`, `report`, and for messaging `tell`, `answer`, `inbox`,
+`agents`, `pair` (`hook` is called by the plugin's Claude Code hooks).
 
 ### The policy `init` writes
 

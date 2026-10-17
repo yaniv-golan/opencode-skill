@@ -17,6 +17,7 @@ A Claude Code marketplace containing one plugin, `opencode-delegate`, with one s
 | `opencode-delegate/skills/opencode/SKILL.md` | The skill: the orchestration workflow Claude follows. Ships to users. |
 | `opencode-delegate/skills/opencode/scripts/delegate.py` | The only script. Stdlib Python; every OpenCode interaction goes through it. Ships to users. |
 | `evals/opencode/evals.json` | Test prompts for the skill. Outside the plugin on purpose, so it never ships. |
+| `evals/harness/` | cowork-harness protocol scenarios for those prompts, fixtures, and `run.sh` (live runs only; no cassettes). |
 | `skill-packager.json`, `VERSION`, `VERSIONING.md` | Packaging metadata and the version contract. |
 | `README.md`, `CHANGELOG.md`, `LICENSE` | User-facing docs; LICENSE carries both the upstream and the fork copyright. |
 | `docs/internal/` | Local-only notes (gitignored). Never reference it from tracked files. |
@@ -106,8 +107,11 @@ There is no unit-test suite; changes are verified by smoke runs. **Always isolat
 any real installation:
 
 ```bash
-export OPENCODE_DELEGATE_HOME=$(mktemp -d) OPENCODE_DELEGATE_PORT=4098
+export OPENCODE_DELEGATE_HOME=$(mktemp -d /tmp/ocd-test.XXXXXX) OPENCODE_DELEGATE_PORT=4098
 ```
+
+Keep test state and throwaway repos out of macOS's per-user temp dir (`/var/folders/…`, where a
+bare `mktemp -d` lands): OpenCode 1.19.3 hangs at startup when its working directory is there.
 
 Use a throwaway git repo with a policy from `delegate.py init`. Exercise what you touched, and
 always re-check:
@@ -124,6 +128,14 @@ always re-check:
 - `apply`: `--check`, clean apply, conflict (exit 6, file unchanged), already-applied
 - snapshot task: worktree detached, private ref follows each attempt, and `git push --all` to a
   scratch bare remote does not carry the ref or the snapshot's blobs
+- `--check` (a passing and a failing check → exit 7, FAIL output shown) and `--only` (an
+  out-of-scope change → exit 7); both reused by the next attempt of the same task
+- `land`: refuses `--commit` when a task file has the user's own changes (file untouched),
+  commits only the task's files, leaves other staged work staged, removes the task
+- messaging: `tell` before a run (in the brief) and during one (delivered once); `ask_orchestrator`
+  → `inbox --wait` → `answer` → tool result; `inbox --wait --repo` exits when the run ends; a
+  forged or unsigned envelope is neutralised; parallel `hook` calls deliver each message once;
+  `pair` lets a peer message arrive as a `<peer-message>`, and an unpaired send is refused
 
 Validate the skill after any `SKILL.md` change. These validators come from the `skill-creator-plus`
 plugin; run them from that skill's directory:

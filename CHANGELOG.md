@@ -19,10 +19,54 @@ versions follow [Semantic Versioning](https://semver.org/).
   hooks and signing disabled), so retries never lose work; `diff --last` shows the latest attempt.
 - Per-task metadata records the task's base, so `diff` and `apply` measure OpenCode's changes, not
   the user's snapshot; `list` shows base, attempt commits, uncommitted changes and applied state.
+- Messaging between Claude and a task's OpenCode agent, with no daemon: each `run` is its task's
+  broker.
+  - `tell` queues a message: it opens the next attempt's brief, or reaches a live session mid-task,
+    delivered once.
+  - `answer` replies to a task's question.
+  - `inbox [--wait] [--repo R]` reads the task messages addressed to this Claude session.
+  - `agents` shows each task's queued messages and whether its run is live.
+  - `pair` lets two tasks of one repo message each other.
+- A bundled OpenCode plugin gives the task three tools: `message_orchestrator`,
+  `ask_orchestrator` (waits for the answer) and `send_message` (paired tasks only).
+  - Each run has a private localhost endpoint with a one-time bearer token, and a limit of 5
+    messages of at most 4 KB.
+  - Messages are wrapped in envelopes signed with the run's token. The plugin neutralises unsigned
+    or forged envelopes, and escapes envelope tags in tool output.
+  - A peer's message has its own envelope and never counts as an instruction from the orchestrator.
+- Plugin hooks (PostToolUse, UserPromptSubmit) deliver a task's messages to the orchestrating
+  Claude session as data, never as user instructions.
+  - Subagents are skipped.
+  - Read, deliver and acknowledge happen in one locked step, so hooks running in parallel deliver
+    each message once.
+- `run --check CMD` (repeatable): the script runs each check in the worktree after OpenCode
+  finishes, with the server's minimal environment, and reports PASS/FAIL.
+- `run --only PATH` (repeatable; a path, directory or glob): changes outside these paths are
+  reported.
+- Both options are saved on the task and reused by later attempts. A failed check or an
+  out-of-scope change returns the new exit code 7.
+- `run` appends the standing rules to every brief, so briefs no longer repeat them:
+  - follow AGENTS.md;
+  - one shell command at a time;
+  - no commits;
+  - make the edits now;
+  - plus the scope and the checks, when given.
+- `land`: apply a task, optionally commit exactly its files (`--commit -m …`, with the user's own
+  identity and hooks), then remove the task.
+  - It refuses to commit when any of those files has the user's own uncommitted changes.
+  - Other staged work stays staged.
 
 ### Changed
 - The skill tells Claude to read every changed test, config, script and build file before running
   checks, because checks execute that code outside any OpenCode policy.
+- The skill now covers the cost of Claude's own time: it spends Claude's output tokens on briefs,
+  review and decisions, and delegates even small fixes.
+- The skill now covers waiting for long tasks:
+  - wake once, when the run ends or a question arrives;
+  - keep `inbox --wait --repo` running next to every background run;
+  - for tasks over about 55 minutes, one cheap check about 50 minutes after the last activity;
+  - take worktree paths from `list` and past runs from `report`, never by guessing the state dir.
+- Secondary gotchas moved to `references/gotchas.md`.
 
 ### Fixed
 - Tolerate OpenCode server stalls: while a session is busy the server can stop answering HTTP for
@@ -35,6 +79,14 @@ versions follow [Semantic Versioning](https://semver.org/).
   pre-apply commit, and model data terms pointing to OpenCode Zen.
 - `remove --delete-branch` checks first and changes nothing when the branch holds attempts that
   were neither applied nor merged; an applied branch can now be deleted without `--force`.
+- Server start and restart are serialised across processes, and `server stop` waits until the old
+  server has exited, so runs started in parallel no longer race each other into a restart.
+- Heartbeat and plugin-token files are keyed by the resolved path. Before this, a worktree reached
+  through a symlink (macOS `/var` → `/private/var`, or a symlinked checkout) was refused, and its
+  messaging was silently off.
+- The server starts from `/`, not from the caller's directory. OpenCode 1.19.3 hangs at startup
+  when its working directory is under the macOS per-user temp dir.
+- Server start waits up to 90 s, on a deadline.
 
 ## [2.0.2] - 2026-10-17
 
