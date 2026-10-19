@@ -141,6 +141,14 @@ always re-check:
 - `run --detach` returns once live; `wait` reports the result once, a question, a run that ended
   before `wait` started, and a SIGKILLed broker as CRASHED (sessions aborted, client stopped);
   SIGTERM to a run → interrupted attempt, 0 active sessions; a second run of a live task refused
+- free-tier limit (or a provider retry more than 2 min away): the run ends within ~15s as exit 4
+  with `MODEL UNAVAILABLE` and the reset time; the session is aborted
+- `watch`: nothing live → refused; one live → attaches in a TTY (waiting for a just-launched run's
+  session), prints the command without one; several → one ready command each; `--print` always
+  exits 0 (the `/watch` command depends on it)
+- `install-command`: refuses a file it didn't write, overwrites its own, warns when the dir is not
+  on PATH; the installed command runs the highest version dir (2.10.0 over 2.2.1), and with it on
+  PATH the `for the user` line says `opencode-delegate <task>`
 - server lock: while a run is live, `server stop` and a run that needs a server restart are refused
   (exit 1); both succeed once it ends or is SIGKILLed; `server stop --force` still stops it
 - isolation: a fresh server's effective config has no `mcp` from the user's global config; a

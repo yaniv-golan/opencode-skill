@@ -10,7 +10,7 @@ description: >
   for delegation (opencode.json policy), choosing the OpenCode model, and reporting past runs.
 argument-hint: "<task description>"
 metadata:
-  version: 2.2.1
+  version: 2.3.0
 ---
 
 # OpenCode delegation
@@ -137,8 +137,11 @@ and pass `--prompt-file`.
   takes 2–5 minutes, sometimes 15–20. For parallel tasks, make one `--detach` call per task, then
   a single `wait`.
 - **Tell the user how to watch it, every launch.** `run --detach` prints a `for the user` line with
-  the `attach` command; pass it on to them verbatim, to paste into their own terminal (it needs a
-  real one). Say that typing into it steers the task, and that `--fork` opens a copy instead.
+  a `watch` command; pass it on to them verbatim, in a code block, to paste into their own terminal
+  (it needs a real one). Say that typing into it steers the task, and that `--fork` opens a copy
+  instead. `/opencode-delegate:watch` prints it again at any time. If they want it shorter,
+  `delegate.py install-command` installs `opencode-delegate` in `~/.local/bin`; run it only when
+  they ask.
 
 ## Step 4 — Read the result
 
@@ -149,7 +152,7 @@ The script streams `[tool] target` lines with elapsed seconds, then a summary. E
 | 0 | `OK` — changes made, syntax clean | Review (Step 5) |
 | 2 | `WROTE_NOTHING` | Read OpenCode's last `[opencode]` text: it may have refused, asked a question, or only described the change. Sharpen the brief; don't silently do it yourself |
 | 3 | `TIMEOUT` — session aborted | `diff` to see partial work; split the task or raise `--timeout` |
-| 4 | `ERROR` — model/server error | Retry once; if repeated, try another model (`models`) |
+| 4 | `ERROR` — model/server error | Retry once; if repeated, try another model (`models`). With `MODEL UNAVAILABLE` and a free-tier limit, don't retry: tell the user when it resets |
 | 5 | `SYNTAX_ERRORS` | Re-delegate on the same `--task` with the error text, or fix if trivial |
 | 7 | `GATE_FAILED`: a `--check` failed, a file outside `--only` changed, or OpenCode edited `opencode.json` | Re-delegate with the FAIL output or the out-of-scope list (`tell`, then `run`) |
 | 1 | Refused before delegating | Read the message (policy, model, slug, setup). Fix the cause; **never pass `--unsafe-policy`** to get past a policy refusal unless the user explicitly tells you to |

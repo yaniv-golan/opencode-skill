@@ -3,6 +3,29 @@
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.3.0] - 2026-10-19
+
+### Added
+- `watch` finds the running task by itself and opens OpenCode's live view of it in your terminal;
+  no repo path or task name needed. Several running tasks are listed with one command each; a
+  task name (or `<key>/<task>`) picks one. Run right after a launch, it waits for the task's
+  session instead of failing.
+- `/opencode-delegate:watch` prints the command to paste, at any time.
+- `install-command` installs a short `opencode-delegate` terminal command (watch by default) in
+  `~/.local/bin`. It runs the newest installed plugin version, so it survives updates; it never
+  overwrites a command it didn't write and never edits shell profiles.
+
+### Fixed
+- A run no longer waits out its whole `--timeout` when the free models' usage limit is reached.
+  OpenCode then holds the session in a silent retry until the reset, hours away. The run now ends
+  within about 15 seconds as `ERROR` (exit 4) with `MODEL UNAVAILABLE`, the reset time, and a note
+  that another free model will not help. Any provider retry more than two minutes away ends the
+  run the same way.
+
+### Changed
+- `run --detach`'s `for the user` line is now that `watch` command (`opencode-delegate <task>`
+  once installed) instead of a long `attach --repo … --task …`.
+
 ## [2.2.1] - 2026-10-19
 
 ### Fixed
@@ -241,6 +264,7 @@ and packaged as the `opencode-delegate` Claude Code plugin.
   Auto-delegation is now opted into per project, in that project's `CLAUDE.md`.
 - Estimated "manual completion" entries in the run log.
 
+[2.3.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/yaniv-golan/opencode-skill/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.2...v2.2.0
 [2.1.2]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.1...v2.1.2

@@ -34,6 +34,11 @@ Read when a run behaves unexpectedly: environment, toolchains, policy caching, s
 - **A timed-out run is fully stopped.** If the client is killed while the request is still queued,
   the server-side session would otherwise keep running and edit the worktree after the run was
   reported (observed). The script aborts every busy session in the worktree on exit and before each run.
+- **Free models share one usage limit.** When it is used up, OpenCode holds the session in a silent
+  retry until the reset (observed: midnight UTC), and the client waits without output. The script
+  checks the session's status every 15 seconds and ends the run as `ERROR` with `MODEL UNAVAILABLE`
+  and the reset time, for a usage limit or any retry more than two minutes away. Switching to
+  another free model doesn't help; the limit covers them all, and every task on the machine.
 - **The server can stall.** While a session is busy, the OpenCode server sometimes stops answering
   for tens of seconds. The script waits up to two minutes before giving up; `server status` says
   "not answering right now" during one. Don't `server stop` a stalled server unless it stays stuck.

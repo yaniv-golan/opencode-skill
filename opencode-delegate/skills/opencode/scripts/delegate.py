@@ -55,7 +55,7 @@ Environment:
   Each run also writes a log to HOME/logs/<repo-key>/<task>/<run_id>.log (a `latest` symlink points
   at the newest); the same text goes to the terminal.
 """
-import argparse, atexit, base64, contextlib, fcntl, fnmatch, functools, hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
+import argparse, atexit, base64, contextlib, fcntl, fnmatch, functools, hashlib, hmac, json, os, re, secrets, shlex, shutil, signal, socket, subprocess, sys, tempfile, threading, time, queue
 import http.server
 import urllib.request, urllib.error
 from datetime import datetime, timezone, timedelta
@@ -882,6 +882,31 @@ def abort_busy_sessions(wt, state):
     return aborted
 
 
+RETRY_GIVE_UP = 120  # seconds; a provider retry further away than this ends the run
+
+
+def model_blocked(wt, state):
+    """Why OpenCode is holding this worktree's session instead of working, when it won't resume
+    soon: a usage limit, or a retry scheduled more than RETRY_GIVE_UP seconds away. The client
+    stays silent meanwhile, so without this a run waits out its whole --timeout."""
+    q = urllib.request.quote(str(wt))
+    try:
+        status = api("GET", f"/session/status?directory={q}", state, timeout=3, patience=0) or {}
+    except Exception:
+        return None
+    for st in status.values():
+        st = st or {}
+        if st.get("type") != "retry":
+            continue
+        nxt = st.get("next") or 0
+        reason = (st.get("action") or {}).get("reason")
+        if reason == "free_tier_limit" or nxt / 1000 - time.time() > RETRY_GIVE_UP:
+            when = (datetime.fromtimestamp(nxt / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    if nxt else "unknown")
+            return reason, f"{st.get('message') or 'model unavailable'} (OpenCode would retry at {when})"
+    return None
+
+
 def _reader(stream, q):
     for line in iter(stream.readline, ""):
         q.put(line)
@@ -976,7 +1001,7 @@ def run_detached(args):
                   f"wait --repo {repo} --task {args.task}")
             # Hand the human a ready-to-paste command; the line above is for the orchestrator.
             print(f"for the user (paste into a terminal to watch or steer the task): "
-                  f"python3 {Path(__file__).resolve()} attach --repo {repo} --task {args.task}")
+                  f"{watch_command(args.task)}")
             return EXIT_OK
         time.sleep(0.5)
     try:
@@ -1414,12 +1439,19 @@ def cmd_run(args):
                 print(f"{stamp()} [WARN] message {msg_id} not delivered yet: {e}")
                 return False
 
-        last_poll = 0.0
+        last_poll, last_status, blocked = 0.0, time.time(), None
         while True:
             remaining = args.timeout - (time.time() - t0)
             if remaining <= 0:
                 timed_out = True
                 break
+            if time.time() - last_status >= 15:
+                last_status = time.time()
+                blocked = model_blocked(wt, state)
+                if blocked:
+                    stats["errors"].append(blocked[1][:300])
+                    print(f"{stamp()} [ERROR] model unavailable: {blocked[1]}", flush=True)
+                    break
             if session_id and time.time() - last_poll >= 5:
                 last_poll = time.time()
                 for m in msg_pending(qfile):
@@ -1516,8 +1548,9 @@ def cmd_run(args):
                 stats["errors"].append(msg[:300])
                 print(f"{stamp()} [ERROR] {msg[:300]}", flush=True)
 
-        if timed_out:
-            print(f"{stamp()} [TIMEOUT] aborting", flush=True)
+        if timed_out or blocked:
+            if timed_out:
+                print(f"{stamp()} [TIMEOUT] aborting", flush=True)
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -1591,6 +1624,11 @@ def cmd_run(args):
         if policy_modified and outcome == "wrote_nothing":
             outcome, code = "gate_failed", EXIT_GATE
         print(f"=== OPENCODE {outcome.upper()} (opencode exit {rc}, {duration}s) ===")
+        if blocked:
+            print("=== MODEL UNAVAILABLE ===\n  " + blocked[1])
+            if blocked[0] == "free_tier_limit":
+                print("  The free models share one usage limit: another free model will not help. "
+                      "Wait for the reset, or use a model from a provider you pay for.")
         if commits:
             print("=== COMMITS CREATED BY OPENCODE (policy should have denied this) ===\n" + commits)
         if changed:
@@ -2706,6 +2744,184 @@ def cmd_wait(args):
         time.sleep(1)
 
 
+def _exec_attach(key, task, session_id, worktree, fork):
+    state = _state()
+    if not state.get("password") or not server_healthy(state):
+        die("the delegate server is not running")
+    print(f"watching {key}/{task} session {session_id}", file=sys.stderr)
+    if not fork:
+        print("typing here sends messages into the task's session and steers it; to only watch, "
+              "don't type (or use --fork to open a copy)", file=sys.stderr)
+    env = dict(os.environ)
+    env["OPENCODE_SERVER_PASSWORD"] = state["password"]
+    cmd = ["opencode", "attach", URL, "--dir", str(worktree), "--session", session_id]
+    if fork:
+        cmd.append("--fork")
+    os.execvpe("opencode", cmd, env)
+
+
+def live_tasks():
+    """Every task whose lease is held, found without knowing its repo or name."""
+    out = []
+    if not LEASES.is_dir():
+        return out
+    for lease in LEASES.glob("*/*.json"):
+        key, task = lease.parent.name, lease.stem
+        if not lease_live(key, task):
+            continue
+        try:
+            data = json.loads(lease.read_text())
+        except (OSError, ValueError):
+            data = {}
+        out.append({"key": key, "task": task, "session": data.get("session"),
+                    "started": data.get("started")})
+    return sorted(out, key=lambda t: (t["key"], t["task"]))
+
+
+SHIM_MARKER = "# opencode-delegate command (written by delegate.py install-command)"
+
+
+def watch_command(target=None):
+    found = shutil.which("opencode-delegate")
+    base = None
+    if found:
+        try:
+            with open(found, "rb") as f:
+                if SHIM_MARKER.encode() in f.read(400):
+                    base = "opencode-delegate"
+        except OSError:
+            pass
+    if base is None:
+        base = "python3 " + shlex.quote(str(Path(__file__).resolve())) + " watch"
+    return base + (" " + target if target else "")
+
+
+def cmd_watch(args):
+    """Find a live task and attach to its session, or print the command to do that."""
+    candidates = live_tasks()
+    if args.repo:
+        repo = repo_root(Path(args.repo).resolve())
+        key = repo_key(repo)
+        candidates = [t for t in candidates if t["key"] in (key, repo.name)]
+    if args.target:
+        if "/" in args.target:
+            candidates = [t for t in candidates if f"{t['key']}/{t['task']}" == args.target]
+        else:
+            candidates = [t for t in candidates if t["task"] == args.target]
+    # --print serves the /watch slash command: everything goes to stdout and it exits 0, because
+    # a failing inline command stops the slash command from loading.
+    printing = args.print or not (sys.stdin.isatty() and sys.stdout.isatty())
+    fork = " --fork" if args.fork else ""
+    if not candidates:
+        msg = ("nothing is running" + (f" matching {args.target}" if args.target else "")
+               + "; `list` shows every task")
+        if args.print:
+            print(msg)
+            return EXIT_OK
+        die(msg)
+    if len(candidates) > 1:
+        print("several tasks are running; paste the line for the one to watch into a terminal "
+              "(typing in it steers the task; --fork opens a copy):")
+        for t in candidates:
+            print(f"  {watch_command(t['key'] + '/' + t['task'])}{fork}    # started {t['started']}")
+        return EXIT_OK if args.print else EXIT_USAGE
+    task = candidates[0]
+    key, name = task["key"], task["task"]
+    if printing:
+        print(f"watching {key}/{name}: paste this into a terminal (typing in it steers the task; "
+              f"--fork opens a copy):")
+        print("  " + watch_command(f"{key}/{name}") + fork)
+        return EXIT_OK
+    # A just-launched run is live before OpenCode has opened its session; wait for it briefly.
+    session, deadline = task["session"], time.time() + 30
+    if not session:
+        print(f"waiting for {key}/{name} to open its session…", file=sys.stderr)
+    while not session and time.time() < deadline and lease_live(key, name):
+        time.sleep(1)
+        try:
+            session = json.loads(lease_path(key, name).read_text()).get("session")
+        except (OSError, ValueError):
+            session = None
+    if not session:
+        die(f"{key}/{name} has no session yet" if lease_live(key, name)
+            else f"{key}/{name} ended before opening a session")
+    _exec_attach(key, name, session, WORKTREES / key / name, args.fork)
+
+
+def cmd_install_command(args):
+    d = Path(args.dir).expanduser()
+    target = d / "opencode-delegate"
+    if target.exists():
+        try:
+            ours = SHIM_MARKER in target.read_text(errors="replace")
+        except OSError:
+            ours = False
+        if not ours:
+            die(f"{target} exists and is not ours; not overwriting it. Remove it, or pass --dir")
+    fallback = str(Path(__file__).resolve())
+    content = f'''#!/usr/bin/env python3
+{SHIM_MARKER}
+import os
+import sys
+from pathlib import Path
+
+FALLBACK = {fallback!r}
+ROOT = Path(FALLBACK).parents[4]
+
+
+def _version_key(path):
+    try:
+        return tuple(int(part) for part in path.parents[3].name.split("."))
+    except ValueError:
+        return ()
+
+
+def _script():
+    candidates = list(ROOT.glob("*/skills/opencode/scripts/delegate.py"))
+    if candidates:
+        return max(candidates, key=_version_key)
+    fallback = Path(FALLBACK)
+    if fallback.exists():
+        return fallback
+    print("opencode-delegate: no delegate.py found under " + str(ROOT) + " or at " + FALLBACK,
+          file=sys.stderr)
+    raise SystemExit(1)
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] not in ("watch", "attach", "list", "wait", "report", "-h", "--help"):
+        args = ["watch"] + args
+    script = str(_script())
+    os.execv(sys.executable, [sys.executable, script] + args)
+
+
+main()
+'''
+    d.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(d), prefix=".opencode-delegate-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    print(f"installed {target}")
+    resolved = {os.path.realpath(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p}
+    if os.path.realpath(str(d)) not in resolved:
+        print(f"{d} is not on your PATH; add it, or run {target} directly")
+    found = shutil.which("opencode-delegate")
+    if found and os.path.realpath(found) != os.path.realpath(str(target)):
+        print(f"note: {found} comes first on your PATH and shadows it")
+    print(f"remove with: rm {target}")
+    return EXIT_OK
+
+
 def cmd_attach(args):
     """Open OpenCode's TUI on a task's session, in the caller's own terminal. `attach` replaces
     this process, so it never returns."""
@@ -2726,20 +2942,7 @@ def cmd_attach(args):
                 session_id = entry["session"]
     if not session_id:
         die(f"no session found for {key}/{args.task}")
-    state = _state()
-    if not state.get("password") or not server_healthy(state):
-        die("the delegate server is not running")
-    worktree = worktree_path(repo, args.task)
-    print(f"watching {key}/{args.task} session {session_id}", file=sys.stderr)
-    if not args.fork:
-        print("typing here sends messages into the task's session and steers it; to only watch, "
-              "don't type (or use --fork to open a copy)", file=sys.stderr)
-    env = dict(os.environ)
-    env["OPENCODE_SERVER_PASSWORD"] = state["password"]
-    cmd = ["opencode", "attach", URL, "--dir", str(worktree), "--session", session_id]
-    if args.fork:
-        cmd.append("--fork")
-    os.execvpe("opencode", cmd, env)
+    _exec_attach(key, args.task, session_id, worktree_path(repo, args.task), args.fork)
 
 
 def cmd_hook(args):
@@ -2905,6 +3108,15 @@ def main():
     at.add_argument("--task", required=True)
     at.add_argument("--fork", action="store_true",
                     help="open a copy of the session instead of steering the task's own")
+    w = sub.add_parser("watch", help="watch a running task in your terminal; finds it for you")
+    w.add_argument("target", nargs="?", metavar="TARGET", help="TASK or KEY/TASK")
+    w.add_argument("--repo")
+    w.add_argument("--fork", action="store_true",
+                   help="open a copy of the session instead of steering the task's own")
+    w.add_argument("--print", action="store_true", help="print the command instead of attaching")
+    ic = sub.add_parser("install-command",
+                        help="install the `opencode-delegate` terminal command (watch by default)")
+    ic.add_argument("--dir", default=str(Path.home() / ".local/bin"))
     ag = sub.add_parser("agents", help="task worktrees: queued message counts")
     ag.add_argument("--repo")
     pr = sub.add_parser("pair", help="let two task worktrees message each other")
@@ -2950,7 +3162,8 @@ def main():
         return {"init": cmd_init, "run": cmd_run, "diff": cmd_diff, "list": cmd_list, "apply": cmd_apply,
                 "remove": cmd_remove, "land": cmd_land, "report": cmd_report, "tell": cmd_tell,
                 "answer": cmd_answer, "inbox": cmd_inbox, "wait": cmd_wait, "agents": cmd_agents,
-                "pair": cmd_pair, "attach": cmd_attach}[args.cmd](args)
+                "pair": cmd_pair, "attach": cmd_attach, "watch": cmd_watch,
+                "install-command": cmd_install_command}[args.cmd](args)
     except _Interrupted as e:
         print(f"=== OPENCODE INTERRUPTED before the run started (signal {e}) ===", flush=True)
         return EXIT_ERROR

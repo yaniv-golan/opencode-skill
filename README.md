@@ -166,6 +166,23 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | "found loadable OpenCode extensions" | The repo (or `~/.opencode`) ships OpenCode plugins/tools/agents; review them, then pass `--allow-opencode-dir` |
 | "MCP server … is enabled" | Disable it in `opencode.json`, or pass `--allow-mcp <name>` if you trust it |
 
+## Watching a task
+
+Each time Claude starts a task, it gives you a command to paste into your own terminal. It opens
+OpenCode's live view of the task. Typing into it steers the task; add `--fork` to open a copy
+instead. `/opencode-delegate:watch` prints that command again at any time, and needs no repo path
+or task name: it finds the running task itself, and lists them when several are running.
+
+For a shorter command, install `opencode-delegate` (into `~/.local/bin`, or `--dir <dir>`):
+
+```bash
+python3 ~/.claude/plugins/cache/opencode-delegate-marketplace/opencode-delegate/<version>/skills/opencode/scripts/delegate.py install-command
+```
+
+Then `opencode-delegate` watches the running task, and `opencode-delegate <task>` picks one. It
+always runs the newest installed plugin version, so it survives updates. The installer never
+overwrites a command of that name it didn't write, and never edits your shell profile.
+
 ## Advanced: using `delegate.py` directly
 
 Claude normally runs the script for you, and can run any fix in the table above. To run it
@@ -173,7 +190,8 @@ yourself, it lives in the plugin cache:
 `~/.claude/plugins/cache/opencode-delegate-marketplace/opencode-delegate/<version>/skills/opencode/scripts/delegate.py`.
 Subcommands (`delegate.py --help` for details): `server start|stop|status` (`stop` refuses while a
 run is using the server unless `--force`), `models`, `init`, `run`,
-`diff`, `apply`, `land`, `list`, `remove`, `report`, `wait`, `attach`, and for messaging `tell`,
+`diff`, `apply`, `land`, `list`, `remove`, `report`, `wait`, `watch`, `attach`,
+`install-command`, and for messaging `tell`,
 `answer`, `inbox`, `agents`, `pair` (`hook` is called by the plugin's Claude Code hooks).
 
 ### The policy `init` writes
