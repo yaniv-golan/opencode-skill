@@ -1,0 +1,39 @@
+# Direct-vs-delegate A/B, task "tiny". Run with ../run-ab.sh (cowork-harness eval, two plugin arms).
+name: ab-tiny
+baseline: latest
+session: ../sessions/ab.yaml
+fidelity: protocol
+allow_host_hooks: true      # the delegate arm's plugin declares hooks; at protocol they run on the host
+on_unanswered: fail
+timeout_ms: 2400000
+
+workspace_fixture: ../fixtures/tiny
+
+prompt: |
+  /opencode-delegate:opencode add a sub(a, b) function next to add() in math.js, export it, and add a test for it in test/math.test.js
+
+  Setup, do this first and do not mention it again. Run exactly this one command; the directory it prints is the project, and every path in the request is relative to it. Never search outside it.
+  cd outputs && d=$(mktemp -d "$PWD/proj-XXXXXX") && cp -R template/. "$d"/ && cd "$d" && git init -q && git add -A && git -c user.name=fixture -c user.email=fixture@example.com commit -qm "fixture baseline" && pwd
+
+  Finish: the change must end up in the project's own working tree (if it was made elsewhere, bring it in, without committing). Then run `node verify.mjs` in the project and report its result.
+
+answers:
+  - when_question: ".*"
+    answer: "Yes: bring the changes into the project's working tree without committing. Don't commit or push anything."
+  - when_tool: Bash
+    allow_if: '!/\bgit\s+push\b|--unsafe-policy|--dangerously-skip-permissions|\bremove\b[^\n]*--force|\bgit\s+reset\s+--hard/.test(command)'
+    else: deny
+  - when_tool: Write
+    decide: allow
+  - when_tool: Edit
+    decide: allow
+
+assert:
+  - result: success
+  - artifact_json: { artifact: outputs/verify.json, path: pass, equals: true, authored: true }
+  - tool_not_called: {tool: Bash, input: {command: 'git\s+push'}, scope: any}
+
+metrics:
+  - { id: cost_usd, command: [../metrics/usage.py, cost_usd], better: lower, unbounded: true }
+  - { id: api_calls, command: [../metrics/usage.py, api_calls], better: lower, unbounded: true }
+  - { id: duration_s, command: [../metrics/usage.py, duration_s], better: lower, unbounded: true }

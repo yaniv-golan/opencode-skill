@@ -1,0 +1,10 @@
+# Session for the direct-vs-delegate A/B (cowork-harness eval). Opus pinned: the question is what
+# delegation costs the orchestrator that real sessions use. Effort left at the agent default.
+# Needs CLAUDE_CODE_OAUTH_TOKEN, and OPENCODE_DELEGATE_HOME / OPENCODE_DELEGATE_PORT=4098 (see run-ab.sh).
+model: claude-opus-5-5
+permission_mode: default
+permission_parity: cowork
+plugins:
+  config_dir: null
+  local_plugins:
+    - ../../../../opencode-delegate
