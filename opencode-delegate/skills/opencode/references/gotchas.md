@@ -46,3 +46,11 @@ Read when a run behaves unexpectedly: environment, toolchains, policy caching, s
 - **Keep the script path in a variable, not the whole command.** zsh does not split unquoted
   variables, so `P="python3 /…/delegate.py"; $P list` fails; `S=/…/delegate.py; python3 $S list`
   works in every shell.
+- **Secret-looking files in a snapshot.** `--from-working-tree` lists every untracked file it
+  includes and refuses these names unless `--allow-secret-files`: `.env*`;
+  `.pem/.key/.p12/.pfx/.kdbx/.keystore/.jks` files; `id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`
+  keys; `credentials*`, `.netrc`, `.npmrc`, `.pypirc`.
+- **Making a project delegate by default.** Add a line to **that project's** `CLAUDE.md` (never the
+  global one), e.g. `Coding tasks in this repo are delegated to OpenCode via the opencode skill;
+  Claude plans, briefs, reviews and lands.` Ask the user before editing it. That makes every coding
+  task cost the orchestration turns, small ones included.

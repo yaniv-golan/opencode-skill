@@ -138,12 +138,16 @@ always re-check:
 - snapshot task with an untracked policy: the snapshot leaves it out; a later main-checkout edit is picked up
 - `land`: refuses `--commit` when a task file has the user's own changes (file untouched),
   commits only the task's files, leaves other staged work staged, removes the task
+- `run --wait SECS`: one call launches and returns the result plus the diff (`=== DIFF`), or a
+  question, or exit 8 within SECS (launch time included); the child process does not wait or
+  re-detach; refused without `CLAUDE_CODE_SESSION_ID`. `wait --diff` prints each finished task's
+  diff, a size notice above 25,000 characters, and "no changes" for a run that wrote nothing
 - `run --detach` returns once live; `wait` reports the result once, a question, a run that ended
   before `wait` started, and a SIGKILLed broker as CRASHED (sessions aborted, client stopped);
   SIGTERM to a run → interrupted attempt, 0 active sessions; a second run of a live task refused
 - free-tier limit (or a provider retry more than 2 min away): the run ends within ~15s as exit 4
   with `MODEL UNAVAILABLE` and the reset time; the session is aborted
-- `watch`: nothing live → refused; one live → attaches in a TTY (waiting for a just-launched run's
+- `watch`: nothing live → refused (`watch <task>` in a TTY first waits up to 120s for it to start); one live → attaches in a TTY (waiting for a just-launched run's
   session), prints the command without one; several → one ready command each; `--print` always
   exits 0 (the `/watch` command depends on it)
 - `install-command`: refuses a file it didn't write, overwrites its own, warns when the dir is not

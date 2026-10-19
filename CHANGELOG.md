@@ -3,6 +3,30 @@
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.4.0] - 2026-10-19
+
+### Changed
+- The skill no longer says that even a one-line edit is cheaper to delegate. Measured, delegating
+  costs the orchestrator more than doing a small task itself (1.4–1.8× on four small tasks, and
+  slower), because every launch, wait, review and land is a Claude turn that re-reads the whole
+  context. Step 1 now says to do small and medium changes directly, and to delegate when the user
+  or the project asks for it, for large volumes of code, for parallel independent tasks, or to
+  keep iteration out of a long context.
+- The skill's workflow takes fewer Claude turns: read the rules, policy and files in one command,
+  write the brief and launch in one command, review the diff the launch prints, and land with one
+  command.
+- SKILL.md is about a sixth shorter, and it is re-read on every turn; details moved to `references/`.
+
+### Added
+- `run --wait SECS` launches a run and waits for it in the same call (at most SECS in all),
+  printing the result and the task's whole diff, or a question from the task; exit 8 if it is
+  still running.
+- `wait --diff` prints each finished task's diff after its result, so reviewing it needs no
+  separate `diff` call. A diff over 25,000 characters is left out with a note to use `diff`.
+- `watch <task>` waits up to two minutes for a task that hasn't started yet, so Claude can give
+  you the watch command in its message before the launch, instead of after a launch that also
+  waits.
+
 ## [2.3.0] - 2026-10-19
 
 ### Added
@@ -264,6 +288,7 @@ and packaged as the `opencode-delegate` Claude Code plugin.
   Auto-delegation is now opted into per project, in that project's `CLAUDE.md`.
 - Estimated "manual completion" entries in the run log.
 
+[2.4.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/yaniv-golan/opencode-skill/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.2...v2.2.0

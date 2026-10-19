@@ -12,8 +12,9 @@ Subcommands (all print plain text; exit codes below):
   server start|stop|status        manage the shared OpenCode server
   models                          list models the server offers (free ones marked)
   init REPO [--allow CMD ...]     write a default-deny opencode.json into REPO
-  run --repo R --task SLUG (--prompt TEXT | --prompt-file F) [--detach] [options]
-                                  `--detach` returns once the run is live and prints its log path
+  run --repo R --task SLUG (--prompt TEXT | --prompt-file F) [--detach | --wait SECS] [options]
+                                  `--detach` returns once the run is live and prints its log path;
+                                  `--wait SECS` also waits, like `wait --diff`, until SECS have passed
   diff --repo R --task SLUG [--last]   OpenCode's changes vs the task's base (or the last attempt)
   apply --repo R --task SLUG [--check] [--3way]
                                   apply the task's changes to the main checkout's working tree
@@ -23,8 +24,9 @@ Subcommands (all print plain text; exit codes below):
   tell --repo R --task SLUG TEXT   queue a message for a task's OpenCode agent
   answer --repo R --task SLUG TEXT queue an answer for a task's OpenCode agent
   inbox [--session ID]            show and acknowledge messages for this Claude session (one-shot)
-  wait --repo R [--task T ...] [--max SECS] [--stream] [--session ID]
+  wait --repo R [--task T ...] [--max SECS] [--diff] [--stream] [--session ID]
                                   wait for detached runs: print their messages and results
+                                  (`--diff`: and each finished task's diff)
   attach --repo R --task SLUG [--fork]   open OpenCode's viewer on a task's session (your terminal)
   agents [--repo R]               task worktrees: how many messages each has queued
   hook                            deliver this session's pending messages to a Claude Code hook
@@ -40,7 +42,8 @@ Exit codes for `run`:
   1 usage / setup error (nothing was delegated)
 Exit codes for `apply`: 0 applied (or --check clean), 2 nothing to apply, 6 conflicts (nothing changed)
 `land` returns apply's codes, plus 4 when applied but the commit failed (the task is kept)
-Exit codes for `wait`: 0 event(s) printed or nothing running, 1 usage, 8 still running at --max
+Exit codes for `wait` (and `run --wait`): 0 event(s) printed or nothing running, 1 usage,
+  8 still running at --max; a finished run's own exit code is in its `=== DONE … (exit N) ===` line
 
 Environment:
   OPENCODE_DELEGATE_MODEL   default model (else opencode/deepseek-v4.1-flash-free)
@@ -975,8 +978,15 @@ def run_detached(args):
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"detach-{os.getpid()}.out"
     out_fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    argv = ([sys.executable, str(Path(__file__).resolve())]
-            + [a for a in sys.argv[1:] if a != "--detach"] + ["--_detached"])
+    argv, skip = [], False
+    for a in sys.argv[1:]:
+        if skip:
+            skip = False
+        elif a == "--wait":
+            skip = True
+        elif a != "--detach" and not a.startswith("--wait="):
+            argv.append(a)
+    argv = [sys.executable, str(Path(__file__).resolve())] + argv + ["--_detached"]
     try:
         child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out_fd,
                                  stderr=subprocess.STDOUT, start_new_session=True,
@@ -998,7 +1008,7 @@ def run_detached(args):
             run_id = data["run_id"]
             print(f"started {repo_key(repo)}/{args.task} (pid {child.pid}, run {run_id}); "
                   f"log {out_dir / (run_id + '.log')}; follow with: "
-                  f"wait --repo {repo} --task {args.task}")
+                  f"wait --repo {repo} --task {args.task} --diff")
             # Hand the human a ready-to-paste command; the line above is for the orchestrator.
             print(f"for the user (paste into a terminal to watch or steer the task): "
                   f"{watch_command(args.task)}")
@@ -1017,7 +1027,18 @@ def run_detached(args):
 
 
 def cmd_run(args):
-    if args.detach:
+    if args.wait is not None and not args._detached:
+        # Launch and wait in one call: each orchestrator call re-reads its whole context.
+        started = time.time()
+        if not os.environ.get("CLAUDE_CODE_SESSION_ID"):
+            die("--wait needs CLAUDE_CODE_SESSION_ID (use --detach, then wait --session ID)")
+        rc = run_detached(args)
+        if rc != EXIT_OK:
+            return rc
+        return cmd_wait(argparse.Namespace(
+            repo=args.repo, task=[args.task], max=max(5, int(args.wait - (time.time() - started))),
+            diff=True, stream=False, session=None, since=300))
+    if args.detach and not args._detached:
         return run_detached(args)
     if not SLUG_RE.match(args.task):
         die("--task must be lowercase letters, digits and hyphens (max 49 chars)")
@@ -1809,6 +1830,20 @@ def merge_base(repo, wt):
     return git(wt, "merge-base", "HEAD", git(repo, "rev-parse", "HEAD").strip(), check=False).strip()
 
 
+def task_diff(wt, base):
+    """The worktree's changes since base, plus each new untracked file's text."""
+    out = [git(wt, "diff", base)]
+    for f, s in task_changes(wt).items():
+        if s != "??":
+            continue
+        try:
+            body = (wt / f).read_text()[:20000]
+        except (UnicodeDecodeError, OSError):
+            body = "(binary or unreadable)"
+        out.append(f"\n=== new untracked file: {f} ===\n{body}\n")
+    return "".join(out)
+
+
 def cmd_diff(args):
     repo, wt = task_worktree(args)
     meta = load_meta(repo, args.task, wt)
@@ -1817,15 +1852,7 @@ def cmd_diff(args):
         base = "HEAD~1" if last_is_attempt and not task_changes(wt) else "HEAD"
     else:
         base = meta["base"]
-    sys.stdout.write(git(wt, "diff", base))
-    untracked = [f for f, s in task_changes(wt).items() if s == "??"]
-    for f in untracked:
-        p = wt / f
-        print(f"\n=== new untracked file: {f} ===")
-        try:
-            print(p.read_text()[:20000])
-        except (UnicodeDecodeError, OSError):
-            print("(binary or unreadable)")
+    sys.stdout.write(task_diff(wt, base))
     return EXIT_OK
 
 
@@ -2569,6 +2596,28 @@ def entry_recent(entry, floor):
     return when >= floor
 
 
+DIFF_INLINE_MAX = 25000
+
+
+def print_wait_diff(repo, task):
+    """A finished task's whole diff since its base, so reviewing it needs no extra call."""
+    wt = worktree_path(repo, task)
+    try:
+        meta = load_meta(repo, task, wt)
+        text = task_diff(wt, meta["base"])
+    except (SystemExit, Exception) as exc:
+        print(f"=== DIFF {task}: unavailable ({exc}) ===")
+        return
+    if not text.strip():
+        print(f"=== DIFF {task}: no changes since the task's base ===")
+    elif len(text) > DIFF_INLINE_MAX:
+        print(f"=== DIFF {task}: {len(text)} chars, too long to print here; read it with "
+              f"`diff --repo {repo} --task {task}` ===")
+    else:
+        print(f"=== DIFF {task} (base {meta['base'][:10]} to worktree) ===")
+        sys.stdout.write(text if text.endswith("\n") else text + "\n")
+
+
 def cmd_wait(args):
     """Wait for detached runs of a repo without a background shell. Claim this session's
     messages (same atomic claim the hook uses) and report each finished or crashed run once,
@@ -2638,11 +2687,16 @@ def cmd_wait(args):
                 print(f"=== DONE {key}/{task} run {rid}: {e.get('outcome')} "
                       f"(exit {e.get('exit_code')}) ===")
                 excerpt = log_excerpt(key, task, rid)
+                if excerpt is not None and args.diff:
+                    # The diff follows, so drop the summary's pointer to `diff`; keep the session.
+                    excerpt = re.sub(r"^review: .*\|\s+(session \S+)$", r"\1", excerpt, flags=re.M)
                 if excerpt is not None:
                     print(excerpt)
                 else:
                     print(f"(no log at {logp}; model {e.get('model')}, session {e.get('session')}, "
                           f"duration {e.get('duration_secs')}s, files changed {e.get('files_changed')})")
+                if args.diff:
+                    print_wait_diff(repo, task)
             sys.stdout.flush()
             mark_reported(rep_path, rid)
             reported.add(rid)
@@ -2778,6 +2832,8 @@ def live_tasks():
     return sorted(out, key=lambda t: (t["key"], t["task"]))
 
 
+WATCH_START_WAIT = 120
+
 SHIM_MARKER = "# opencode-delegate command (written by delegate.py install-command)"
 
 
@@ -2798,19 +2854,31 @@ def watch_command(target=None):
 
 def cmd_watch(args):
     """Find a live task and attach to its session, or print the command to do that."""
-    candidates = live_tasks()
-    if args.repo:
-        repo = repo_root(Path(args.repo).resolve())
-        key = repo_key(repo)
-        candidates = [t for t in candidates if t["key"] in (key, repo.name)]
-    if args.target:
-        if "/" in args.target:
-            candidates = [t for t in candidates if f"{t['key']}/{t['task']}" == args.target]
-        else:
-            candidates = [t for t in candidates if t["task"] == args.target]
+    repo = repo_root(Path(args.repo).resolve()) if args.repo else None
+
+    def find():
+        found = live_tasks()
+        if repo:
+            found = [t for t in found if t["key"] in (repo_key(repo), repo.name)]
+        if args.target:
+            if "/" in args.target:
+                found = [t for t in found if f"{t['key']}/{t['task']}" == args.target]
+            else:
+                found = [t for t in found if t["task"] == args.target]
+        return found
+
     # --print serves the /watch slash command: everything goes to stdout and it exits 0, because
     # a failing inline command stops the slash command from loading.
     printing = args.print or not (sys.stdin.isatty() and sys.stdout.isatty())
+    candidates = find()
+    # Claude gives the user `watch <task>` just before launching it, so a named task may not have
+    # started yet: wait for it briefly instead of refusing.
+    if args.target and not candidates and not printing:
+        print(f"waiting for {args.target} to start…", file=sys.stderr)
+        deadline = time.time() + WATCH_START_WAIT
+        while not candidates and time.time() < deadline:
+            time.sleep(1)
+            candidates = find()
     fork = " --fork" if args.fork else ""
     if not candidates:
         msg = ("nothing is running" + (f" matching {args.target}" if args.target else "")
@@ -3063,6 +3131,9 @@ def main():
                         "main checkout's")
     r.add_argument("--detach", action="store_true",
                    help="start the run in the background and return once it is live")
+    r.add_argument("--wait", type=int, metavar="SECS",
+                   help="like --detach, then wait for the run as `wait --diff` does, for at most "
+                        "SECS in all (the launch included)")
     r.add_argument("--_detached", action="store_true", help=argparse.SUPPRESS)
     for name in ("diff", "remove", "apply"):
         p = sub.add_parser(name)
@@ -3100,6 +3171,8 @@ def main():
                     help="seconds to wait (default 100, or 1800 with --stream)")
     wa.add_argument("--stream", action="store_true",
                     help="print one line per event and keep going until nothing is running")
+    wa.add_argument("--diff", action="store_true",
+                    help="after each finished run, print its task's whole diff since the base")
     wa.add_argument("--session")
     wa.add_argument("--since", type=int, default=300,
                     help="also report runs that finished this many seconds before wait started (default 300)")
