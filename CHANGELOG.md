@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.2.1] - 2026-10-19
+
+### Fixed
+- Two repositories with the same folder name (for example `a/app` and `b/app`) no longer share
+  task state. Worktrees, briefs, logs, leases and messages are now kept per repository path
+  (`<name>-<hash>`), so a task in one can no longer pick up the other's worktree, brief or run
+  results. Tasks created by earlier versions keep working from their old location.
+- `run` refuses an existing worktree that belongs to another repository instead of running in it.
+
 ## [2.2.0] - 2026-10-18
 
 ### Security
@@ -232,6 +241,7 @@ and packaged as the `opencode-delegate` Claude Code plugin.
   Auto-delegation is now opted into per project, in that project's `CLAUDE.md`.
 - Estimated "manual completion" entries in the run log.
 
+[2.2.1]: https://github.com/yaniv-golan/opencode-skill/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.2...v2.2.0
 [2.1.2]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/yaniv-golan/opencode-skill/compare/v2.1.0...v2.1.1

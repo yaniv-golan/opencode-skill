@@ -52,10 +52,10 @@ Environment:
   OPENCODE_DELEGATE_PATH_PREPEND  dir(s) put first on PATH for the server (so for every
                             shell command OpenCode runs) and for --setup, e.g. a pinned
                             Node: ~/.nvm/versions/node/v24.18.0/bin. Read at server start.
-  Each run also writes a log to HOME/logs/<repo>/<task>/<run_id>.log (a `latest` symlink points
+  Each run also writes a log to HOME/logs/<repo-key>/<task>/<run_id>.log (a `latest` symlink points
   at the newest); the same text goes to the terminal.
 """
-import argparse, atexit, base64, contextlib, fcntl, fnmatch, hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
+import argparse, atexit, base64, contextlib, fcntl, fnmatch, functools, hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time, queue
 import http.server
 import urllib.request, urllib.error
 from datetime import datetime, timezone, timedelta
@@ -623,8 +623,41 @@ def repo_root(path):
     return Path(common).parent if common.endswith("/.git") else Path(root)
 
 
+def common_dir(path):
+    common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir", check=False).strip()
+    return os.path.realpath(common) if common else ""
+
+
+def repo_key(repo):
+    """State key for a repo's per-task files. Two repos can share a folder name
+    (~/a/app, ~/b/app); keying worktrees, task meta/briefs, logs, leases and mailboxes
+    on repo.name alone would make them collide, so the key appends 8 hex chars of
+    sha256(realpath). Legacy rule: if this repo has no keyed worktree dir yet but
+    WORKTREES/<repo.name> holds a worktree whose git common dir is this repo's, the old
+    folder-name key is returned so tasks created before this change keep working."""
+    return _repo_key(str(repo))
+
+
+@functools.lru_cache(maxsize=None)
+def _repo_key(path):
+    repo = Path(path)
+    key = f"{repo.name}-{hashlib.sha256(os.path.realpath(repo).encode()).hexdigest()[:8]}"
+    # Legacy rule: before this key existed, state lived under the bare folder name. If this
+    # repo has no keyed worktree dir yet but WORKTREES/<repo.name> holds a worktree whose git
+    # common dir really is this repo's, reuse the old key so existing tasks keep working.
+    legacy = WORKTREES / repo.name
+    if not (WORKTREES / key).exists() and legacy.is_dir():
+        for wt in legacy.iterdir():
+            if not (wt.is_dir() and (wt / ".git").exists()):
+                continue
+            common = common_dir(wt)
+            if common and common == common_dir(repo):
+                return repo.name
+    return key
+
+
 def worktree_path(repo, slug):
-    return WORKTREES / repo.name / slug
+    return WORKTREES / repo_key(repo) / slug
 
 
 PRIVATE_REF_PREFIX = "refs/opencode-delegate/tasks/"
@@ -661,6 +694,10 @@ def ensure_worktree(repo, slug, base, private=False):
     if wt.exists():
         if not (wt / ".git").exists():
             die(f"{wt} exists but is not a git worktree; remove it or pick another --task")
+        # Defence in depth: never reuse a same-named dir that belongs to another repository.
+        other = common_dir(wt) or "?"
+        if other != common_dir(repo):
+            die(f"{wt} belongs to another repository ({other}); pick another --task")
         return wt, False
     for ref in (task_ref_name(slug, False), task_ref_name(slug, True)):
         if ref_exists(repo, ref):
@@ -689,7 +726,7 @@ def git_env(repo, env_extra, *args, check=True):
 
 
 def meta_path(repo, slug):
-    return TASKS / repo.name / f"{slug}.json"
+    return TASKS / repo_key(repo) / f"{slug}.json"
 
 
 def load_meta(repo, slug, wt=None):
@@ -909,7 +946,7 @@ def run_detached(args):
     repo = repo_root(Path(args.repo).resolve())
     if not SLUG_RE.match(args.task):
         die("--task must be lowercase letters, digits and hyphens (max 49 chars)")
-    out_dir = LOGS / repo.name / args.task
+    out_dir = LOGS / repo_key(repo) / args.task
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"detach-{os.getpid()}.out"
     out_fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -921,7 +958,7 @@ def run_detached(args):
                                  env=dict(os.environ, PYTHONUNBUFFERED="1"))
     finally:
         os.close(out_fd)
-    lease = lease_path(repo.name, args.task)
+    lease = lease_path(repo_key(repo), args.task)
     deadline = time.time() + 300
     while time.time() < deadline:
         rc = child.poll()
@@ -934,7 +971,7 @@ def run_detached(args):
             data = {}
         if data.get("pid") == child.pid and data.get("run_id"):
             run_id = data["run_id"]
-            print(f"started {repo.name}/{args.task} (pid {child.pid}, run {run_id}); "
+            print(f"started {repo_key(repo)}/{args.task} (pid {child.pid}, run {run_id}); "
                   f"log {out_dir / (run_id + '.log')}; follow with: "
                   f"wait --repo {repo} --task {args.task}")
             # Hand the human a ready-to-paste command; the line above is for the orchestrator.
@@ -977,7 +1014,7 @@ def cmd_run(args):
     # authority: a stale file whose process is gone does not block a new run.
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}"
     lease_started = datetime.now(timezone.utc).isoformat()
-    lfile = lease_path(repo.name, args.task)
+    lfile = lease_path(repo_key(repo), args.task)
     lfile.parent.mkdir(parents=True, exist_ok=True)
     lease_fd = None
     try:
@@ -986,7 +1023,7 @@ def cmd_run(args):
     except BlockingIOError:
         if lease_fd is not None:
             os.close(lease_fd)
-        die(f"task {repo.name}/{args.task} is already running")
+        die(f"task {repo_key(repo)}/{args.task} is already running")
     except OSError as e:
         if lease_fd is not None:
             os.close(lease_fd)
@@ -1002,7 +1039,7 @@ def cmd_run(args):
         prev_handlers[_sig] = signal.signal(_sig, handle_signal)
 
     # Every run gets its own log; from here on stdout is mirrored into it.
-    log_dir = LOGS / repo.name / args.task
+    log_dir = LOGS / repo_key(repo) / args.task
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{run_id}.log"
     log_stream = os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w")
@@ -1168,7 +1205,7 @@ def cmd_run(args):
     if os.environ.get("CLAUDE_CODE_SESSION_ID"):
         meta["orchestrator"] = "claude:" + os.environ["CLAUDE_CODE_SESSION_ID"]
         save_meta(repo, args.task, meta)
-    endpoint = RunEndpoint(repo.name, args.task, meta.get("orchestrator"), meta.get("peers", []),
+    endpoint = RunEndpoint(repo_key(repo), args.task, meta.get("orchestrator"), meta.get("peers", []),
                            lambda text: print(f"[task-msg] {text}", flush=True))
     tokfile = plugin_token_file(wt)
     tokfile.parent.mkdir(parents=True, exist_ok=True)
@@ -1249,7 +1286,7 @@ def cmd_run(args):
     # Save the caller's brief so a later session can recover it after a timeout, crash or
     # compaction: the prompt itself, without the queued-message block or the standing rules.
     attempt = attempt_count(wt, meta["base"]) + 1
-    brief_dir = TASKS / repo.name
+    brief_dir = TASKS / repo_key(repo)
     brief_dir.mkdir(parents=True, exist_ok=True)
     for bp in (brief_dir / f"{args.task}.brief-{attempt}.md", brief_dir / f"{args.task}.brief.md"):
         fd = os.open(bp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1291,7 +1328,7 @@ def cmd_run(args):
         write_lease()
 
         env = dict(os.environ, OPENCODE_SERVER_PASSWORD=state.get("password", ""))
-        qfile = msg_task_file(repo.name, args.task)
+        qfile = msg_task_file(repo_key(repo), args.task)
         pending = msg_pending(qfile)
         delivered = []
         brief = prompt
@@ -1617,7 +1654,8 @@ def cmd_run(args):
         HOME.mkdir(parents=True, exist_ok=True)
         entry = dict(ts=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), delegate="opencode",
                      run_id=run_id,
-                     project=repo.name, repo=str(repo), task=args.task, worktree=str(wt), model=model,
+                     project=repo.name, key=repo_key(repo), repo=str(repo), task=args.task,
+                     worktree=str(wt), model=model,
                      session=session_id, outcome=outcome, exit_code=code, opencode_exit=rc,
                      timed_out=timed_out, timeout_secs=args.timeout, duration_secs=duration,
                      prompt_words=len(prompt.split()), files_changed=len(changed),
@@ -1678,8 +1716,8 @@ def cmd_run(args):
             # (d) log the interruption with the fields we have (never invent any)
             try:
                 entry = dict(ts=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                             delegate="opencode", run_id=run_id, project=repo.name, repo=str(repo),
-                             task=args.task, worktree=str(wt), model=model,
+                             delegate="opencode", run_id=run_id, project=repo.name, key=repo_key(repo),
+                             repo=str(repo), task=args.task, worktree=str(wt), model=model,
                              outcome="interrupted", exit_code=EXIT_ERROR)
                 if session_id is not None:
                     entry["session"] = session_id
@@ -1761,10 +1799,10 @@ def cmd_list(args):
                 entry = json.loads(line)
             except ValueError:
                 continue
-            last[(entry.get("project"), entry.get("task"))] = entry
+            last[(entry.get("key") or entry.get("project"), entry.get("task"))] = entry
     except OSError:
         pass
-    roots = [WORKTREES / repo_root(Path(args.repo).resolve()).name] if args.repo else \
+    roots = [WORKTREES / repo_key(repo_root(Path(args.repo).resolve()))] if args.repo else \
         sorted(p for p in WORKTREES.glob("*") if p.is_dir())
     any_found = False
     for root in roots:
@@ -1781,7 +1819,7 @@ def cmd_list(args):
                 common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
                 repo_path = str(Path(common).parent)
             print(f"  repo: {repo_path}")
-            brief = TASKS / repo.name / f"{wt.name}.brief.md"
+            brief = TASKS / root.name / f"{wt.name}.brief.md"
             if brief.exists():
                 print(f"  brief: {brief}")
             entry = last.get((root.name, wt.name))
@@ -1801,8 +1839,8 @@ def cmd_apply(args):
     """Apply the task's changes (base..HEAD) to the MAIN checkout's working tree. The only
     command that writes to the user's checkout; it never touches the index unless --3way."""
     repo, wt = task_worktree(args)
-    if lease_live(repo.name, args.task):
-        die(f"task {repo.name}/{args.task} has a live run; wait for it to finish (or stop it) first")
+    if lease_live(repo_key(repo), args.task):
+        die(f"task {repo_key(repo)}/{args.task} has a live run; wait for it to finish (or stop it) first")
     meta = load_meta(repo, args.task, wt)
     ref = meta.get("ref") or task_ref_name(args.task, False)
     if task_changes(wt):
@@ -1852,8 +1890,8 @@ def cmd_apply(args):
 
 def cmd_remove(args):
     repo, wt = task_worktree(args)
-    if lease_live(repo.name, args.task):
-        die(f"task {repo.name}/{args.task} has a live run; wait for it to finish (or stop it) first")
+    if lease_live(repo_key(repo), args.task):
+        die(f"task {repo_key(repo)}/{args.task} has a live run; wait for it to finish (or stop it) first")
     dirty = task_changes(wt)
     if dirty and not args.force:
         die(f"{wt} has {len(dirty)} uncommitted change(s); review/commit them or pass --force")
@@ -1872,7 +1910,7 @@ def cmd_remove(args):
     # --force is needed for the untracked copied policy file even when nothing else changed.
     git(repo, "worktree", "remove", "--force", str(wt))
     meta_path(repo, args.task).unlink(missing_ok=True)
-    for bp in (TASKS / repo.name).glob(f"{args.task}.brief*.md"):
+    for bp in (TASKS / repo_key(repo)).glob(f"{args.task}.brief*.md"):
         bp.unlink(missing_ok=True)
     print(f"removed worktree {wt}")
     if args.delete_branch:
@@ -1886,8 +1924,8 @@ def cmd_remove(args):
 def cmd_land(args):
     """Apply a task, optionally commit exactly its files in the main checkout, then remove it."""
     repo, wt = task_worktree(args)
-    if lease_live(repo.name, args.task):
-        die(f"task {repo.name}/{args.task} has a live run; wait for it to finish (or stop it) first")
+    if lease_live(repo_key(repo), args.task):
+        die(f"task {repo_key(repo)}/{args.task} has a live run; wait for it to finish (or stop it) first")
     meta = load_meta(repo, args.task, wt)
     ref = meta.get("ref") or task_ref_name(args.task, False)
     if task_changes(wt):
@@ -2375,15 +2413,15 @@ def msg_print(messages):
 
 def cmd_tell(args):
     repo, _ = task_worktree(args)
-    m = msg_append(msg_task_file(repo.name, args.task), msg_sender(), "message", " ".join(args.text))
-    print(f"queued {m['id']} for {repo.name}/{args.task}")
+    m = msg_append(msg_task_file(repo_key(repo), args.task), msg_sender(), "message", " ".join(args.text))
+    print(f"queued {m['id']} for {repo_key(repo)}/{args.task}")
     return EXIT_OK
 
 
 def cmd_answer(args):
     repo, _ = task_worktree(args)
-    m = msg_append(msg_task_file(repo.name, args.task), msg_sender(), "answer", " ".join(args.text))
-    print(f"answer {m['id']} queued for {repo.name}/{args.task}")
+    m = msg_append(msg_task_file(repo_key(repo), args.task), msg_sender(), "answer", " ".join(args.text))
+    print(f"answer {m['id']} queued for {repo_key(repo)}/{args.task}")
     return EXIT_OK
 
 
@@ -2448,10 +2486,10 @@ def watched_tasks(repo, only):
     if only:
         return sorted(dict.fromkeys(only))
     names = set()
-    wts = WORKTREES / repo.name
+    wts = WORKTREES / repo_key(repo)
     if wts.is_dir():
         names.update(p.name for p in wts.glob("*") if (p / ".git").exists())
-    leases = LEASES / repo.name
+    leases = LEASES / repo_key(repo)
     if leases.is_dir():
         names.update(p.stem for p in leases.glob("*.json"))
     return sorted(names)
@@ -2502,6 +2540,7 @@ def cmd_wait(args):
     if not session:
         die("no session id: pass --session or set CLAUDE_CODE_SESSION_ID")
     repo = repo_root(Path(args.repo).resolve())
+    key = repo_key(repo)
     msg_path = msg_session_file(session)
     rep_path = reported_path(session)
     started = datetime.now(timezone.utc)
@@ -2527,8 +2566,8 @@ def cmd_wait(args):
 
         live_now = {}
         for task in tasks:
-            if lease_live(repo.name, task):
-                rid = lease_run_id(repo.name, task)
+            if lease_live(key, task):
+                rid = lease_run_id(key, task)
                 if rid:
                     live_now[rid] = task
         for rid, task in live_now.items():
@@ -2540,7 +2579,9 @@ def cmd_wait(args):
                 stopped[rid] = now
 
         reported = reported_ids(rep_path)
-        entries = [e for e in run_log_entries() if e.get("project") == repo.name]
+        # Match the new per-repo key; older run-log entries have no "key" and only project.
+        entries = [e for e in run_log_entries()
+                   if e.get("key") == key or ("key" not in e and e.get("project") == repo.name)]
         logged = {e.get("run_id") for e in entries if e.get("run_id")}
 
         for e in entries:
@@ -2552,13 +2593,13 @@ def cmd_wait(args):
             if rid not in seen_live and not entry_recent(e, floor):
                 continue
             task = e.get("task")
-            logp = LOGS / repo.name / task / f"{rid}.log"
+            logp = LOGS / key / task / f"{rid}.log"
             if args.stream:
                 print(f"[done] {task} {e.get('outcome')} exit {e.get('exit_code')} log {logp}")
             else:
-                print(f"=== DONE {repo.name}/{task} run {rid}: {e.get('outcome')} "
+                print(f"=== DONE {key}/{task} run {rid}: {e.get('outcome')} "
                       f"(exit {e.get('exit_code')}) ===")
-                excerpt = log_excerpt(repo.name, task, rid)
+                excerpt = log_excerpt(key, task, rid)
                 if excerpt is not None:
                     print(excerpt)
                 else:
@@ -2573,9 +2614,9 @@ def cmd_wait(args):
         # entry; lease_live is False and no other path will ever report it. Report it as crashed
         # even when this `wait` never saw it live.
         for task in tasks:
-            if lease_live(repo.name, task):
+            if lease_live(key, task):
                 continue
-            lp = lease_path(repo.name, task)
+            lp = lease_path(key, task)
             if not lp.exists():
                 continue
             try:
@@ -2601,11 +2642,11 @@ def cmd_wait(args):
             try:
                 aborted = abort_busy_sessions(worktree_path(repo, task), _state())
             except Exception as exc:
-                print(f"[WARN] could not abort sessions for {repo.name}/{task}: {exc}", flush=True)
+                print(f"[WARN] could not abort sessions for {key}/{task}: {exc}", flush=True)
             if args.stream:
                 print(f"[crashed] {task} {rid}")
             else:
-                print(f"=== CRASHED {repo.name}/{task} run {rid}: no result recorded; "
+                print(f"=== CRASHED {key}/{task} run {rid}: no result recorded; "
                       f"aborted sessions: {', '.join(aborted)} ===")
             sys.stdout.flush()
             mark_reported(rep_path, rid)
@@ -2637,11 +2678,11 @@ def cmd_wait(args):
             try:
                 aborted = abort_busy_sessions(worktree_path(repo, task), _state())
             except Exception as exc:
-                print(f"[WARN] could not abort sessions for {repo.name}/{task}: {exc}", flush=True)
+                print(f"[WARN] could not abort sessions for {key}/{task}: {exc}", flush=True)
             if args.stream:
                 print(f"[crashed] {task} {rid}")
             else:
-                print(f"=== CRASHED {repo.name}/{task} run {rid}: no result recorded; "
+                print(f"=== CRASHED {key}/{task} run {rid}: no result recorded; "
                       f"aborted sessions: {', '.join(aborted)} ===")
             sys.stdout.flush()
             mark_reported(rep_path, rid)
@@ -2655,7 +2696,7 @@ def cmd_wait(args):
         elif printed:
             return EXIT_OK
         elif not live_now and not unresolved:
-            print(f"no task of {repo.name} is running")
+            print(f"no task of {key} is running")
             return EXIT_OK
 
         if time.time() >= deadline:
@@ -2671,24 +2712,25 @@ def cmd_attach(args):
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         die("attach opens an interactive viewer; run it in your own terminal")
     repo = repo_root(Path(args.repo).resolve())
+    key = repo_key(repo)
     session_id = None
-    if lease_live(repo.name, args.task):
+    if lease_live(key, args.task):
         try:
-            session_id = json.loads(lease_path(repo.name, args.task).read_text()).get("session")
+            session_id = json.loads(lease_path(key, args.task).read_text()).get("session")
         except (OSError, ValueError):
             session_id = None
     if not session_id:
         for entry in run_log_entries():
-            if (entry.get("project") == repo.name and entry.get("task") == args.task
-                    and entry.get("session")):
+            if ((entry.get("key") == key or ("key" not in entry and entry.get("project") == repo.name))
+                    and entry.get("task") == args.task and entry.get("session")):
                 session_id = entry["session"]
     if not session_id:
-        die(f"no session found for {repo.name}/{args.task}")
+        die(f"no session found for {key}/{args.task}")
     state = _state()
     if not state.get("password") or not server_healthy(state):
         die("the delegate server is not running")
     worktree = worktree_path(repo, args.task)
-    print(f"watching {repo.name}/{args.task} session {session_id}", file=sys.stderr)
+    print(f"watching {key}/{args.task} session {session_id}", file=sys.stderr)
     if not args.fork:
         print("typing here sends messages into the task's session and steers it; to only watch, "
               "don't type (or use --fork to open a copy)", file=sys.stderr)
@@ -2735,16 +2777,15 @@ def cmd_hook(args):
 
 
 def cmd_agents(args):
-    roots = [WORKTREES / repo_root(Path(args.repo).resolve()).name] if args.repo else \
+    roots = [WORKTREES / repo_key(repo_root(Path(args.repo).resolve()))] if args.repo else \
         sorted(p for p in WORKTREES.glob("*") if p.is_dir())
     any_found = False
     for root in roots:
         for wt in sorted(p for p in root.glob("*") if (p / ".git").exists()):
             any_found = True
-            repo = repo_root(wt)
-            n = len(msg_pending(msg_task_file(repo.name, wt.name)))
-            live = "live" if lease_live(repo.name, wt.name) else "idle"
-            print(f"{repo.name}/{wt.name}  queued-to-task: {n}  run: {live}")
+            n = len(msg_pending(msg_task_file(root.name, wt.name)))
+            live = "live" if lease_live(root.name, wt.name) else "idle"
+            print(f"{root.name}/{wt.name}  queued-to-task: {n}  run: {live}")
     if not any_found:
         print("no task worktrees")
     return EXIT_OK
@@ -2763,7 +2804,7 @@ def cmd_pair(args):
         b["peers"].append(args.task)
     save_meta(repo, args.task, a)
     save_meta(repo, args.with_, b)
-    print(f"paired {repo.name}/{args.task} <-> {repo.name}/{args.with_}")
+    print(f"paired {repo_key(repo)}/{args.task} <-> {repo_key(repo)}/{args.with_}")
     return EXIT_OK
 
 
